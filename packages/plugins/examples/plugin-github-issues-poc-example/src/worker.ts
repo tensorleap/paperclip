@@ -7,9 +7,14 @@ const DEFAULT_REPOSITORY_FULL_NAME = "tensorleap/concierge";
 const DEFAULT_ASSIGNEE_LOGIN = "marvin-tensorleap";
 const DEFAULT_ISSUE_TITLE_PREFIX = "[GitHub]";
 const DEFAULT_SYNC_MODE = "inbound_only";
+const DEFAULT_OUTBOUND_COMMENT_POLICY = "disabled";
 const LAST_DELIVERY_STATE_KEY = "github:last-delivery";
 const SOURCE_MIRROR_SECTION_START = "<!-- paperclip-github-source-mirror:start -->";
 const SOURCE_MIRROR_SECTION_END = "<!-- paperclip-github-source-mirror:end -->";
+const GITHUB_API_BASE_URL = "https://api.github.com";
+const GITHUB_API_VERSION = "2022-11-28";
+const OUTBOUND_ACK_MARKER = "<!-- paperclip-github-outbound:intake_acknowledgement -->";
+const OUTBOUND_FINAL_SAVEBACK_MARKER = "<!-- paperclip-github-outbound:final_saveback_done -->";
 
 type AssigneeRoute = {
   githubAssigneeLogin: string;
@@ -17,12 +22,23 @@ type AssigneeRoute = {
   paperclipAssigneeLabel: string | null;
 };
 
+type OutboundCommentPolicy =
+  | "disabled"
+  | "acknowledge_intake_once"
+  | "acknowledge_and_saveback_done";
+
+type OutboundCommentKind =
+  | "intake_acknowledgement"
+  | "final_saveback_done";
+
 type PluginConfig = {
   companyId: string;
   projectId: string;
   webhookSecretRef: string;
+  githubWriteTokenSecretRef: string;
   repositoryFullName: string;
   syncMode: string;
+  outboundCommentPolicy: OutboundCommentPolicy;
   assigneeRoutes: AssigneeRoute[];
   issueTitlePrefix: string;
 };
@@ -46,8 +62,10 @@ type HealthData = {
   projectId: string | null;
   repositoryFullName: string;
   syncMode: string;
+  outboundCommentPolicy: OutboundCommentPolicy;
   assigneeRoutes: AssigneeRoute[];
   webhookSecretConfigured: boolean;
+  githubWriteTokenConfigured: boolean;
   webhookPath: string;
   lastDelivery: DeliveryState | null;
 };
@@ -61,7 +79,14 @@ type IssueMapping = {
   mappedPaperclipAssigneeAgentId: string | null;
   mappedPaperclipAssigneeLabel: string | null;
   syncMode: string;
+  outboundCommentPolicy: OutboundCommentPolicy;
   lastDeliveryId: string | null;
+  intakeAcknowledgedAt: string | null;
+  finalSavebackState: string | null;
+  outboundCommentIds: number[];
+  lastOutboundCommentId: number | null;
+  lastOutboundCommentKind: OutboundCommentKind | null;
+  lastOutboundCommentAt: string | null;
   paperclipIssueId: string;
   paperclipIssueIdentifier: string | null;
   createdAt: string;
@@ -123,6 +148,7 @@ type GitHubRepository = {
 };
 
 type GitHubComment = {
+  id?: unknown;
   body?: unknown;
   html_url?: unknown;
   user?: GitHubActor | null;
@@ -172,6 +198,23 @@ function normalizeBoolean(value: unknown): boolean {
   return value === true;
 }
 
+function normalizeNumber(value: unknown): number | null {
+  return typeof value === "number" && Number.isFinite(value) ? value : null;
+}
+
+function normalizeNumberList(value: unknown): number[] {
+  if (!Array.isArray(value)) return [];
+  const numbers: number[] = [];
+  const seen = new Set<number>();
+  for (const entry of value) {
+    const numberValue = normalizeNumber(entry);
+    if (numberValue == null || seen.has(numberValue)) continue;
+    seen.add(numberValue);
+    numbers.push(numberValue);
+  }
+  return numbers;
+}
+
 function normalizeAssigneeRoute(value: unknown): AssigneeRoute | null {
   if (!value || typeof value !== "object" || Array.isArray(value)) return null;
   const route = value as Record<string, unknown>;
@@ -210,6 +253,14 @@ function buildLegacyAssigneeRoutes(raw: Record<string, unknown>): AssigneeRoute[
     paperclipAssigneeAgentId,
     paperclipAssigneeLabel: null,
   }];
+}
+
+function normalizeOutboundCommentPolicy(value: unknown): OutboundCommentPolicy {
+  const normalized = normalizeString(value);
+  if (normalized === "acknowledge_intake_once" || normalized === "acknowledge_and_saveback_done") {
+    return normalized;
+  }
+  return DEFAULT_OUTBOUND_COMMENT_POLICY;
 }
 
 function getHeader(headers: Record<string, string | string[]>, name: string): string | null {
@@ -251,6 +302,14 @@ function getPullRequestNumber(payload: GitHubPullRequestPayload | GitHubPullRequ
     return payload.pull_request.number;
   }
   throw new Error("GitHub payload is missing a valid pull request number");
+}
+
+function parseRepositoryFullName(repositoryFullName: string): { owner: string; name: string } {
+  const [owner, name] = repositoryFullName.split("/", 2);
+  if (!owner || !name) {
+    throw new Error(`Invalid GitHub repository full name: ${repositoryFullName}`);
+  }
+  return { owner, name };
 }
 
 function githubKey(repositoryFullName: string, number: number): string {
@@ -334,6 +393,7 @@ function buildSourceMirrorSection(input: {
   trackedGitHubAssigneeLogin: string | null;
   mappedPaperclipAssigneeLabel: string | null;
   syncMode: string;
+  outboundCommentPolicy: OutboundCommentPolicy;
   lastDeliveryId: string | null;
 }): string {
   return joinCommentLines([
@@ -351,6 +411,7 @@ function buildSourceMirrorSection(input: {
       ? `- Mapped Paperclip assignee: ${input.mappedPaperclipAssigneeLabel}`
       : "- Mapped Paperclip assignee: unavailable",
     `- Sync mode: \`${input.syncMode}\``,
+    `- Outbound comment policy: \`${input.outboundCommentPolicy}\``,
     input.lastDeliveryId
       ? `- Last GitHub delivery id: \`${input.lastDeliveryId}\``
       : "- Last GitHub delivery id: unavailable",
@@ -365,6 +426,7 @@ function buildInitialIssueDescription(input: {
   trackedGitHubAssigneeLogin: string | null;
   mappedPaperclipAssigneeLabel: string | null;
   syncMode: string;
+  outboundCommentPolicy: OutboundCommentPolicy;
   lastDeliveryId: string | null;
   githubIssueBody: string | null;
 }): string {
@@ -500,6 +562,67 @@ function buildPullRequestCommentBody(input: {
   ]);
 }
 
+function buildGitHubIntakeAcknowledgementBody(mapping: IssueMapping): string {
+  const identifier = mapping.paperclipIssueIdentifier ?? mapping.paperclipIssueId;
+  const policyLine = mapping.outboundCommentPolicy === "acknowledge_and_saveback_done"
+    ? "GitHub will receive one final completion comment when that Paperclip issue is marked `done`."
+    : "This repo is configured for intake acknowledgement only; Paperclip keeps the remaining execution thread internal.";
+  return joinCommentLines([
+    OUTBOUND_ACK_MARKER,
+    `Paperclip mirrored this issue as \`${identifier}\`.`,
+    policyLine,
+  ]);
+}
+
+function buildGitHubFinalSavebackBody(mapping: IssueMapping): string {
+  const identifier = mapping.paperclipIssueIdentifier ?? mapping.paperclipIssueId;
+  return joinCommentLines([
+    OUTBOUND_FINAL_SAVEBACK_MARKER,
+    `Paperclip issue \`${identifier}\` is marked \`done\`.`,
+    "This is the configured final saveback for the mirrored Paperclip thread.",
+  ]);
+}
+
+function buildOutboundAuditComment(input: {
+  kind: OutboundCommentKind;
+  githubIssueKey: string;
+  policy: OutboundCommentPolicy;
+  githubCommentId: number | null;
+  githubCommentUrl?: string | null;
+}): string {
+  const title = input.kind === "intake_acknowledgement"
+    ? "GitHub outbound intake acknowledgement posted"
+    : "GitHub final saveback posted";
+  return joinCommentLines([
+    `${title}: ${input.githubIssueKey}`,
+    `Policy: \`${input.policy}\``,
+    input.githubCommentId != null ? `GitHub comment id: \`${input.githubCommentId}\`` : null,
+    input.githubCommentUrl ? `URL: ${input.githubCommentUrl}` : null,
+    "Loop guard: hidden outbound marker plus stored GitHub comment id.",
+  ]);
+}
+
+function buildOutboundFailureComment(input: {
+  kind: OutboundCommentKind;
+  githubIssueKey: string;
+  policy: OutboundCommentPolicy;
+  error: string;
+}): string {
+  const title = input.kind === "intake_acknowledgement"
+    ? "GitHub outbound intake acknowledgement failed"
+    : "GitHub final saveback failed";
+  return joinCommentLines([
+    `${title}: ${input.githubIssueKey}`,
+    `Policy: \`${input.policy}\``,
+    `Error: ${input.error}`,
+  ]);
+}
+
+function commentContainsOutboundMarker(body: string | null): boolean {
+  if (!body) return false;
+  return body.includes(OUTBOUND_ACK_MARKER) || body.includes(OUTBOUND_FINAL_SAVEBACK_MARKER);
+}
+
 function extractIssueReferenceKeys(repositoryFullName: string, texts: Array<string | null | undefined>): string[] {
   const keys = new Set<string>();
 
@@ -568,6 +691,24 @@ function issueShouldCreatePaperclipWork(
     && findAssigneeRoute(issue, config.assigneeRoutes, fallbackAssignee) != null;
 }
 
+function outboundCommentPolicyNeedsToken(policy: OutboundCommentPolicy): boolean {
+  return policy !== "disabled";
+}
+
+function intakeAcknowledgementEnabled(config: PluginConfig): boolean {
+  return config.outboundCommentPolicy === "acknowledge_intake_once"
+    || config.outboundCommentPolicy === "acknowledge_and_saveback_done";
+}
+
+function finalSavebackEnabled(config: PluginConfig): boolean {
+  return config.outboundCommentPolicy === "acknowledge_and_saveback_done";
+}
+
+function outboundCommentsRuntimeReady(config: PluginConfig): boolean {
+  return !outboundCommentPolicyNeedsToken(config.outboundCommentPolicy)
+    || Boolean(config.githubWriteTokenSecretRef);
+}
+
 function runtimeReady(config: PluginConfig): boolean {
   return Boolean(
     config.companyId
@@ -586,8 +727,10 @@ function normalizeConfig(rawConfig: Record<string, unknown>): PluginConfig {
     companyId: normalizeString(rawConfig.companyId) ?? "",
     projectId: normalizeString(rawConfig.projectId) ?? "",
     webhookSecretRef: normalizeString(rawConfig.webhookSecretRef) ?? "",
+    githubWriteTokenSecretRef: normalizeString(rawConfig.githubWriteTokenSecretRef) ?? "",
     repositoryFullName: normalizeString(rawConfig.repositoryFullName) ?? DEFAULT_REPOSITORY_FULL_NAME,
     syncMode: normalizeString(rawConfig.syncMode) ?? DEFAULT_SYNC_MODE,
+    outboundCommentPolicy: normalizeOutboundCommentPolicy(rawConfig.outboundCommentPolicy),
     assigneeRoutes: fallbackRoutes,
     issueTitlePrefix: normalizeString(rawConfig.issueTitlePrefix) ?? DEFAULT_ISSUE_TITLE_PREFIX,
   };
@@ -652,7 +795,14 @@ function withMirrorDefaults(
       ?? fallbackRoute?.paperclipAssigneeAgentId
       ?? null,
     syncMode: mapping.syncMode || config.syncMode,
+    outboundCommentPolicy: mapping.outboundCommentPolicy || config.outboundCommentPolicy,
     lastDeliveryId: mapping.lastDeliveryId ?? null,
+    intakeAcknowledgedAt: mapping.intakeAcknowledgedAt ?? null,
+    finalSavebackState: mapping.finalSavebackState ?? null,
+    outboundCommentIds: normalizeNumberList(mapping.outboundCommentIds),
+    lastOutboundCommentId: mapping.lastOutboundCommentId ?? null,
+    lastOutboundCommentKind: mapping.lastOutboundCommentKind ?? null,
+    lastOutboundCommentAt: mapping.lastOutboundCommentAt ?? null,
   };
 }
 
@@ -692,6 +842,7 @@ async function refreshIssueMirror(
     mappedPaperclipAssigneeAgentId: route?.paperclipAssigneeAgentId ?? mapping.mappedPaperclipAssigneeAgentId,
     mappedPaperclipAssigneeLabel: routeLabel ?? mapping.mappedPaperclipAssigneeLabel,
     syncMode: config.syncMode,
+    outboundCommentPolicy: config.outboundCommentPolicy,
     lastDeliveryId: input.deliveryId,
     updatedAt: new Date().toISOString(),
   }, config, route);
@@ -739,7 +890,14 @@ async function recoverIssueMappingFromOrigin(
     mappedPaperclipAssigneeAgentId: fallbackRoute?.paperclipAssigneeAgentId ?? issue.assigneeAgentId,
     mappedPaperclipAssigneeLabel: fallbackRoute?.paperclipAssigneeLabel ?? null,
     syncMode: config.syncMode,
+    outboundCommentPolicy: config.outboundCommentPolicy,
     lastDeliveryId: null,
+    intakeAcknowledgedAt: null,
+    finalSavebackState: null,
+    outboundCommentIds: [],
+    lastOutboundCommentId: null,
+    lastOutboundCommentKind: null,
+    lastOutboundCommentAt: null,
     paperclipIssueId: issue.id,
     paperclipIssueIdentifier: issue.identifier,
     createdAt: issue.createdAt.toISOString(),
@@ -766,6 +924,202 @@ async function appendIssueComment(
   body: string,
 ): Promise<void> {
   await ctx.issues.createComment(issueId, body, companyId);
+}
+
+function shouldIgnoreMirroredGitHubComment(mapping: IssueMapping | null, comment: GitHubComment | null | undefined): boolean {
+  const commentBody = normalizeString(comment?.body);
+  if (commentContainsOutboundMarker(commentBody)) return true;
+  const commentId = normalizeNumber(comment?.id);
+  return commentId != null && Boolean(mapping?.outboundCommentIds.includes(commentId));
+}
+
+async function postGitHubIssueComment(
+  ctx: PluginContext,
+  config: PluginConfig,
+  mapping: IssueMapping,
+  body: string,
+): Promise<{ commentId: number | null; commentUrl: string | null }> {
+  if (!config.githubWriteTokenSecretRef) {
+    throw new Error("githubWriteTokenSecretRef is required for outbound GitHub comments");
+  }
+  const token = await ctx.secrets.resolve(config.githubWriteTokenSecretRef);
+  const repositoryFullName = mapping.githubIssueKey.split("#")[0] ?? config.repositoryFullName;
+  const { owner, name } = parseRepositoryFullName(repositoryFullName);
+  const response = await ctx.http.fetch(
+    `${GITHUB_API_BASE_URL}/repos/${encodeURIComponent(owner)}/${encodeURIComponent(name)}/issues/${mapping.githubIssueNumber}/comments`,
+    {
+      method: "POST",
+      headers: {
+        accept: "application/vnd.github+json",
+        authorization: `Bearer ${token}`,
+        "content-type": "application/json",
+        "user-agent": PLUGIN_ID,
+        "x-github-api-version": GITHUB_API_VERSION,
+      },
+      body: JSON.stringify({ body }),
+    },
+  );
+  const text = await response.text();
+  if (!response.ok) {
+    throw new Error(`GitHub API returned ${response.status}: ${text.slice(0, 200)}`);
+  }
+  let parsed: Record<string, unknown> = {};
+  if (text.trim().length > 0) {
+    const decoded = JSON.parse(text);
+    if (decoded && typeof decoded === "object" && !Array.isArray(decoded)) {
+      parsed = decoded as Record<string, unknown>;
+    }
+  }
+  return {
+    commentId: normalizeNumber(parsed.id),
+    commentUrl: normalizeString(parsed.html_url),
+  };
+}
+
+async function recordOutboundComment(
+  ctx: PluginContext,
+  config: PluginConfig,
+  mapping: IssueMapping,
+  input: {
+    kind: OutboundCommentKind;
+    commentId: number | null;
+  },
+): Promise<IssueMapping> {
+  const now = new Date().toISOString();
+  const outboundCommentIds = input.commentId != null
+    ? [...new Set([...mapping.outboundCommentIds, input.commentId])]
+    : mapping.outboundCommentIds;
+  const nextMapping = withMirrorDefaults({
+    ...mapping,
+    outboundCommentPolicy: config.outboundCommentPolicy,
+    intakeAcknowledgedAt: input.kind === "intake_acknowledgement" ? now : mapping.intakeAcknowledgedAt,
+    finalSavebackState: input.kind === "final_saveback_done" ? "done" : mapping.finalSavebackState,
+    outboundCommentIds,
+    lastOutboundCommentId: input.commentId ?? mapping.lastOutboundCommentId,
+    lastOutboundCommentKind: input.kind,
+    lastOutboundCommentAt: now,
+    updatedAt: now,
+  }, config);
+  await writeIssueMapping(ctx, config.companyId, nextMapping);
+  return nextMapping;
+}
+
+async function clearFinalSavebackState(
+  ctx: PluginContext,
+  config: PluginConfig,
+  mapping: IssueMapping,
+): Promise<IssueMapping> {
+  if (!mapping.finalSavebackState) return mapping;
+  const nextMapping = withMirrorDefaults({
+    ...mapping,
+    finalSavebackState: null,
+    updatedAt: new Date().toISOString(),
+  }, config);
+  await writeIssueMapping(ctx, config.companyId, nextMapping);
+  return nextMapping;
+}
+
+async function sendOutboundComment(
+  ctx: PluginContext,
+  config: PluginConfig,
+  mapping: IssueMapping,
+  input: {
+    kind: OutboundCommentKind;
+    body: string;
+  },
+): Promise<IssueMapping> {
+  const { commentId, commentUrl } = await postGitHubIssueComment(ctx, config, mapping, input.body);
+  const nextMapping = await recordOutboundComment(ctx, config, mapping, {
+    kind: input.kind,
+    commentId,
+  });
+  await appendIssueComment(
+    ctx,
+    config.companyId,
+    mapping.paperclipIssueId,
+    buildOutboundAuditComment({
+      kind: input.kind,
+      githubIssueKey: mapping.githubIssueKey,
+      policy: config.outboundCommentPolicy,
+      githubCommentId: commentId,
+      githubCommentUrl: commentUrl,
+    }),
+  );
+  return nextMapping;
+}
+
+async function maybeSendIntakeAcknowledgement(
+  ctx: PluginContext,
+  config: PluginConfig,
+  mapping: IssueMapping,
+): Promise<IssueMapping> {
+  if (!intakeAcknowledgementEnabled(config) || !outboundCommentsRuntimeReady(config) || mapping.intakeAcknowledgedAt) {
+    return mapping;
+  }
+  try {
+    return await sendOutboundComment(ctx, config, mapping, {
+      kind: "intake_acknowledgement",
+      body: buildGitHubIntakeAcknowledgementBody({
+        ...mapping,
+        outboundCommentPolicy: config.outboundCommentPolicy,
+      }),
+    });
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    ctx.logger.warn("Failed to post GitHub intake acknowledgement", {
+      githubIssueKey: mapping.githubIssueKey,
+      error: message,
+    });
+    await appendIssueComment(
+      ctx,
+      config.companyId,
+      mapping.paperclipIssueId,
+      buildOutboundFailureComment({
+        kind: "intake_acknowledgement",
+        githubIssueKey: mapping.githubIssueKey,
+        policy: config.outboundCommentPolicy,
+        error: message,
+      }),
+    );
+    return mapping;
+  }
+}
+
+async function maybeSendFinalSaveback(
+  ctx: PluginContext,
+  config: PluginConfig,
+  mapping: IssueMapping,
+): Promise<IssueMapping> {
+  if (!finalSavebackEnabled(config) || !outboundCommentsRuntimeReady(config) || mapping.finalSavebackState === "done") {
+    return mapping;
+  }
+  try {
+    return await sendOutboundComment(ctx, config, mapping, {
+      kind: "final_saveback_done",
+      body: buildGitHubFinalSavebackBody({
+        ...mapping,
+        outboundCommentPolicy: config.outboundCommentPolicy,
+      }),
+    });
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    ctx.logger.warn("Failed to post GitHub final saveback", {
+      githubIssueKey: mapping.githubIssueKey,
+      error: message,
+    });
+    await appendIssueComment(
+      ctx,
+      config.companyId,
+      mapping.paperclipIssueId,
+      buildOutboundFailureComment({
+        kind: "final_saveback_done",
+        githubIssueKey: mapping.githubIssueKey,
+        policy: config.outboundCommentPolicy,
+        error: message,
+      }),
+    );
+    return mapping;
+  }
 }
 
 async function maybeWakeIssue(
@@ -839,6 +1193,7 @@ async function ensureIssueMapping(
       trackedGitHubAssigneeLogin: matchedRoute.githubAssigneeLogin,
       mappedPaperclipAssigneeLabel,
       syncMode: config.syncMode,
+      outboundCommentPolicy: config.outboundCommentPolicy,
       lastDeliveryId: deliveryId,
       githubIssueBody: normalizeString(issue.body),
     }),
@@ -866,7 +1221,14 @@ async function ensureIssueMapping(
     mappedPaperclipAssigneeAgentId: matchedRoute.paperclipAssigneeAgentId,
     mappedPaperclipAssigneeLabel,
     syncMode: config.syncMode,
+    outboundCommentPolicy: config.outboundCommentPolicy,
     lastDeliveryId: deliveryId,
+    intakeAcknowledgedAt: null,
+    finalSavebackState: null,
+    outboundCommentIds: [],
+    lastOutboundCommentId: null,
+    lastOutboundCommentKind: null,
+    lastOutboundCommentAt: null,
     paperclipIssueId: createdIssue.id,
     paperclipIssueIdentifier: createdIssue.identifier,
     createdAt: new Date().toISOString(),
@@ -884,6 +1246,7 @@ async function ensureIssueMapping(
       normalizeString(issue.html_url) ? `URL: ${normalizeString(issue.html_url)}` : null,
       `Mapped Paperclip assignee: ${mappedPaperclipAssigneeLabel}`,
       `Sync mode: \`${config.syncMode}\``,
+      `Outbound comment policy: \`${config.outboundCommentPolicy}\``,
       "",
       `Paperclip issue created from \`issues.${triggerAction}\`.`,
       `Event actor: \`${actorLogin(actor, fallbackAssignee)}\``,
@@ -959,10 +1322,13 @@ async function syncIssuesWebhook(
     action,
   );
   if (mappingResult.created) {
+    const acknowledgedMapping = mappingResult.mapping
+      ? await maybeSendIntakeAcknowledgement(ctx, config, mappingResult.mapping)
+      : mappingResult.mapping;
     return {
       processed: true,
       reason: `issues:${action}:created`,
-      mappedIssueId: mappingResult.mapping?.paperclipIssueId ?? null,
+      mappedIssueId: acknowledgedMapping?.paperclipIssueId ?? null,
       wakeQueued: mappingResult.wakeQueued,
     };
   }
@@ -1106,6 +1472,17 @@ async function syncIssueCommentWebhook(
     };
   }
 
+  const githubIssueKey = githubKey(repositoryFullName, getIssueNumber(issue));
+  const existingMapping = await getOrRecoverIssueMapping(ctx, config, config.companyId, githubIssueKey);
+  if (shouldIgnoreMirroredGitHubComment(existingMapping, payload.comment)) {
+    return {
+      processed: false,
+      reason: "ignored-outbound-comment",
+      mappedIssueId: existingMapping?.paperclipIssueId ?? null,
+      wakeQueued: false,
+    };
+  }
+
   const mappingResult = await ensureIssueMapping(
     ctx,
     config,
@@ -1119,18 +1496,21 @@ async function syncIssueCommentWebhook(
   if (!mappingResult.mapping) {
     return { processed: false, reason: "issue-mapping-missing", mappedIssueId: null, wakeQueued: false };
   }
+  const mappedIssueAfterAck = mappingResult.created
+    ? await maybeSendIntakeAcknowledgement(ctx, config, mappingResult.mapping)
+    : mappingResult.mapping;
 
   const matchedRoute = findAssigneeRoute(issue, config.assigneeRoutes);
   const wakeQueued = mappingResult.wakeQueued
-    || await maybeWakeIssue(ctx, config.companyId, mappingResult.mapping.paperclipIssueId, deliveryId, `github:issue_comment.${action}`);
+    || await maybeWakeIssue(ctx, config.companyId, mappedIssueAfterAck.paperclipIssueId, deliveryId, `github:issue_comment.${action}`);
 
   await appendIssueComment(
     ctx,
     config.companyId,
-    mappingResult.mapping.paperclipIssueId,
+    mappedIssueAfterAck.paperclipIssueId,
     buildCommentMirrorBody({
       eventName: `GitHub issue_comment.${action}`,
-      githubKey: mappingResult.mapping.githubIssueKey,
+      githubKey: mappedIssueAfterAck.githubIssueKey,
       actorLogin: actorLogin(payload.comment?.user, payload.sender),
       githubUrl: normalizeString(payload.comment?.html_url) ?? normalizeString(issue.html_url),
       commentBody: normalizeString(payload.comment?.body),
@@ -1138,17 +1518,17 @@ async function syncIssueCommentWebhook(
     }),
   );
 
-  await refreshIssueMirror(ctx, config, mappingResult.mapping, {
+  await refreshIssueMirror(ctx, config, mappedIssueAfterAck, {
     deliveryId,
-    githubIssueUrl: normalizeString(issue.html_url) ?? mappingResult.mapping.githubIssueUrl,
-    githubIssueTitle: normalizeString(issue.title) ?? mappingResult.mapping.githubIssueTitle,
+    githubIssueUrl: normalizeString(issue.html_url) ?? mappedIssueAfterAck.githubIssueUrl,
+    githubIssueTitle: normalizeString(issue.title) ?? mappedIssueAfterAck.githubIssueTitle,
     route: matchedRoute,
   });
 
   return {
     processed: true,
     reason: `issue_comment:${action}`,
-    mappedIssueId: mappingResult.mapping.paperclipIssueId,
+    mappedIssueId: mappedIssueAfterAck.paperclipIssueId,
     wakeQueued,
   };
 }
@@ -1277,21 +1657,64 @@ async function syncPullRequestReviewCommentWebhook(
   };
 }
 
+function eventPayloadRecord(payload: unknown): Record<string, unknown> | null {
+  return payload && typeof payload === "object" && !Array.isArray(payload)
+    ? payload as Record<string, unknown>
+    : null;
+}
+
+async function handleIssueUpdatedEvent(ctx: PluginContext, event: { companyId: string; entityId?: string; actorType?: string; payload: unknown }) {
+  const config = await getConfig(ctx);
+  if (event.companyId !== config.companyId) return;
+
+  const issueId = normalizeString(event.entityId);
+  if (!issueId) return;
+
+  const issue = await ctx.issues.get(issueId, config.companyId);
+  if (!issue || issue.originKind !== `plugin:${PLUGIN_ID}` || !issue.originId) return;
+
+  const mapping = await getOrRecoverIssueMapping(ctx, config, config.companyId, issue.originId);
+  if (!mapping) return;
+
+  if (issue.status !== "done") {
+    await clearFinalSavebackState(ctx, config, mapping);
+    return;
+  }
+
+  if (event.actorType === "plugin") return;
+
+  const payload = eventPayloadRecord(event.payload);
+  const previous = eventPayloadRecord(payload?._previous);
+  const patch = eventPayloadRecord(payload?.patch);
+  const previousStatus = normalizeString(previous?.status);
+  const patchStatus = normalizeString(patch?.status);
+  if (previousStatus === "done") return;
+  if (!previousStatus && patchStatus !== "done") return;
+
+  await maybeSendFinalSaveback(ctx, config, mapping);
+}
+
 const plugin = definePlugin({
   async setup(ctx) {
     currentContext = ctx;
 
+    ctx.events.on("issue.updated", async (event) => {
+      await handleIssueUpdatedEvent(ctx, event);
+    });
+
     ctx.data.register("health", async () => {
       const config = await getConfig(ctx);
       return {
-        status: runtimeReady(config) ? "ok" : "degraded",
+        status: runtimeReady(config) && outboundCommentsRuntimeReady(config) ? "ok" : "degraded",
         checkedAt: new Date().toISOString(),
         companyId: config.companyId || null,
         projectId: config.projectId || null,
         repositoryFullName: config.repositoryFullName,
         syncMode: config.syncMode,
+        outboundCommentPolicy: config.outboundCommentPolicy,
         assigneeRoutes: config.assigneeRoutes,
         webhookSecretConfigured: Boolean(config.webhookSecretRef),
+        githubWriteTokenConfigured: Boolean(config.githubWriteTokenSecretRef),
         webhookPath: `/api/plugins/${PLUGIN_ID}/webhooks/${WEBHOOK_ENDPOINT_KEY}`,
         lastDelivery: await getLastDelivery(ctx),
       } satisfies HealthData;
@@ -1312,6 +1735,9 @@ const plugin = definePlugin({
     if (!normalized.webhookSecretRef) warnings.push("webhookSecretRef is not set yet.");
     if (!normalized.repositoryFullName) errors.push("repositoryFullName is required.");
     if (!normalized.syncMode) errors.push("syncMode is required.");
+    if (outboundCommentPolicyNeedsToken(normalized.outboundCommentPolicy) && !normalized.githubWriteTokenSecretRef) {
+      errors.push("githubWriteTokenSecretRef is required when outboundCommentPolicy enables acknowledgement or saveback comments.");
+    }
     if (normalized.assigneeRoutes.length === 0) {
       errors.push("At least one assignee route is required.");
     }
@@ -1342,8 +1768,19 @@ const plugin = definePlugin({
       }
     }
 
+    if (currentContext && normalized.githubWriteTokenSecretRef) {
+      try {
+        await currentContext.secrets.resolve(normalized.githubWriteTokenSecretRef);
+      } catch (error) {
+        errors.push(error instanceof Error ? error.message : String(error));
+      }
+    }
+
     warnings.push(
       "GitHub delivery still requires an externally reachable HTTPS Paperclip URL plus GitHub repo or app admin rights to register the webhook.",
+    );
+    warnings.push(
+      "Outbound GitHub comments stay sparse by design: one intake acknowledgement, one final saveback on a non-plugin transition to `done`, and webhook echoes carrying the plugin's hidden markers are ignored.",
     );
 
     return {
@@ -1435,17 +1872,19 @@ const plugin = definePlugin({
 
     const config = await getConfig(currentContext);
     return {
-      status: runtimeReady(config) ? "ok" : "degraded",
+      status: runtimeReady(config) && outboundCommentsRuntimeReady(config) ? "ok" : "degraded",
       message: "GitHub concierge webhook worker is running",
       details: {
         repositoryFullName: config.repositoryFullName,
         syncMode: config.syncMode,
+        outboundCommentPolicy: config.outboundCommentPolicy,
         assigneeRoutes: config.assigneeRoutes.map((route) => ({
           githubAssigneeLogin: route.githubAssigneeLogin,
           paperclipAssigneeAgentId: route.paperclipAssigneeAgentId,
           paperclipAssigneeLabel: route.paperclipAssigneeLabel,
         })),
         webhookConfigured: runtimeReady(config),
+        githubWriteTokenConfigured: Boolean(config.githubWriteTokenSecretRef),
       },
     };
   },

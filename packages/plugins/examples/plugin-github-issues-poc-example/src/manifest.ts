@@ -10,6 +10,8 @@ const manifest: PaperclipPluginManifestV1 = {
   categories: ["connector", "automation"],
   capabilities: [
     "agents.read",
+    "events.subscribe",
+    "http.outbound",
     "projects.read",
     "issues.read",
     "issues.create",
@@ -55,6 +57,21 @@ const manifest: PaperclipPluginManifestV1 = {
         title: "Sync Mode",
         description: "GitHub-to-Paperclip sync policy shown on mirrored issues.",
         default: "inbound_only",
+        enum: ["inbound_only"],
+      },
+      outboundCommentPolicy: {
+        type: "string",
+        title: "Outbound Comment Policy",
+        description: "Sparse GitHub comment policy. `disabled` keeps the mirror inbound-only, `acknowledge_intake_once` posts one intake acknowledgement, and `acknowledge_and_saveback_done` also posts one final saveback when Paperclip marks the mirrored issue `done`.",
+        default: "disabled",
+        enum: ["disabled", "acknowledge_intake_once", "acknowledge_and_saveback_done"],
+      },
+      githubWriteTokenSecretRef: {
+        type: "string",
+        title: "GitHub Write Token Secret Ref",
+        description: "Company secret UUID for a GitHub token used only when outboundCommentPolicy enables acknowledgement or saveback comments.",
+        format: "secret-ref",
+        default: "",
       },
       assigneeRoutes: {
         type: "array",
