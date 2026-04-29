@@ -1,5 +1,5 @@
 import { createHmac, randomUUID } from "node:crypto";
-import { describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { createTestHarness } from "@paperclipai/plugin-sdk/testing";
 import manifest from "../src/manifest.js";
 import plugin from "../src/worker.js";
@@ -9,13 +9,17 @@ function buildConfig(input: {
   projectId: string;
   assigneeAgentId: string;
   secretRef: string;
+  outboundCommentPolicy?: "disabled" | "acknowledge_intake_once" | "acknowledge_and_saveback_done";
+  githubWriteTokenSecretRef?: string;
 }) {
   return {
     companyId: input.companyId,
     projectId: input.projectId,
     webhookSecretRef: input.secretRef,
+    githubWriteTokenSecretRef: input.githubWriteTokenSecretRef ?? "",
     repositoryFullName: "tensorleap/concierge",
     syncMode: "inbound_only",
+    outboundCommentPolicy: input.outboundCommentPolicy ?? "disabled",
     assigneeRoutes: [
       {
         githubAssigneeLogin: "marvin-tensorleap",
@@ -31,11 +35,24 @@ function signWebhook(secretRef: string, body: string): string {
   return `sha256=${createHmac("sha256", `resolved:${secretRef}`).update(body).digest("hex")}`;
 }
 
+beforeEach(() => {
+  vi.stubGlobal("fetch", vi.fn(async () => {
+    throw new Error("Unexpected outbound fetch");
+  }));
+});
+
+afterEach(() => {
+  vi.restoreAllMocks();
+  vi.unstubAllGlobals();
+});
+
 describe("github concierge webhook plugin", () => {
   it("declares webhook + issue mutation capabilities", () => {
     expect(manifest).toMatchObject({
       id: "paperclipai.plugin-github-issues-poc-example",
       capabilities: expect.arrayContaining([
+        "events.subscribe",
+        "http.outbound",
         "issues.read",
         "issues.create",
         "issues.update",
@@ -52,6 +69,8 @@ describe("github concierge webhook plugin", () => {
       instanceConfigSchema: expect.objectContaining({
         properties: expect.objectContaining({
           syncMode: expect.any(Object),
+          outboundCommentPolicy: expect.any(Object),
+          githubWriteTokenSecretRef: expect.any(Object),
           assigneeRoutes: expect.any(Object),
         }),
       }),
@@ -113,6 +132,7 @@ describe("github concierge webhook plugin", () => {
     expect(issues[0]?.description).toContain("- GitHub assignee login: `marvin-tensorleap`");
     expect(issues[0]?.description).toContain("- Mapped Paperclip assignee: CEO");
     expect(issues[0]?.description).toContain("- Sync mode: `inbound_only`");
+    expect(issues[0]?.description).toContain("- Outbound comment policy: `disabled`");
     expect(issues[0]?.description).toContain("- Last GitHub delivery id: `delivery-1`");
 
     const createdIssueId = issues[0]!.id;
@@ -120,6 +140,7 @@ describe("github concierge webhook plugin", () => {
     expect(comments).toHaveLength(1);
     expect(comments[0]?.body).toContain("GitHub issue linked: tensorleap/concierge#17");
     expect(comments[0]?.body).toContain("Mapped Paperclip assignee: CEO");
+    expect(comments[0]?.body).toContain("Outbound comment policy: `disabled`");
     expect(comments[0]?.body).toContain("Paperclip wake requested.");
 
     expect(
@@ -135,7 +156,243 @@ describe("github concierge webhook plugin", () => {
       mappedPaperclipAssigneeAgentId: ceoAgentId,
       mappedPaperclipAssigneeLabel: "CEO",
       syncMode: "inbound_only",
+      outboundCommentPolicy: "disabled",
       lastDeliveryId: "delivery-1",
+      intakeAcknowledgedAt: null,
+      finalSavebackState: null,
+      outboundCommentIds: [],
+    }));
+  });
+
+  it("posts one outbound intake acknowledgement and ignores the webhook echo", async () => {
+    const companyId = randomUUID();
+    const projectId = randomUUID();
+    const ceoAgentId = randomUUID();
+    const secretRef = randomUUID();
+    const writeTokenSecretRef = randomUUID();
+    const fetchMock = vi.fn(async () => new Response(JSON.stringify({
+      id: 9001,
+      html_url: "https://github.com/tensorleap/concierge/issues/17#issuecomment-9001",
+    }), {
+      status: 201,
+      headers: { "content-type": "application/json" },
+    }));
+    vi.stubGlobal("fetch", fetchMock);
+
+    const harness = createTestHarness({
+      manifest,
+      capabilities: [...manifest.capabilities, "issue.comments.read"],
+      config: buildConfig({
+        companyId,
+        projectId,
+        assigneeAgentId: ceoAgentId,
+        secretRef,
+        outboundCommentPolicy: "acknowledge_intake_once",
+        githubWriteTokenSecretRef: writeTokenSecretRef,
+      }),
+    });
+    await plugin.definition.setup(harness.ctx);
+
+    const payload = {
+      action: "assigned",
+      repository: { full_name: "tensorleap/concierge" },
+      sender: { login: "octocat" },
+      assignee: { login: "marvin-tensorleap" },
+      issue: {
+        number: 17,
+        title: "Improve onboarding instructions",
+        body: "Make Concierge handoff clearer for new repos.",
+        html_url: "https://github.com/tensorleap/concierge/issues/17",
+        assignees: [{ login: "marvin-tensorleap" }],
+      },
+    };
+    const rawBody = JSON.stringify(payload);
+    await plugin.definition.onWebhook?.({
+      endpointKey: "github",
+      requestId: "req-ack-1",
+      headers: {
+        "x-github-delivery": "delivery-ack-1",
+        "x-github-event": "issues",
+        "x-hub-signature-256": signWebhook(secretRef, rawBody),
+      },
+      rawBody,
+      parsedBody: payload,
+    });
+
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    expect(fetchMock.mock.calls[0]?.[0]).toBe("https://api.github.com/repos/tensorleap/concierge/issues/17/comments");
+    expect(String(fetchMock.mock.calls[0]?.[1]?.body ?? "")).toContain("<!-- paperclip-github-outbound:intake_acknowledgement -->");
+
+    const createdIssue = (await harness.ctx.issues.list({ companyId }))[0]!;
+    const commentsAfterAck = await harness.ctx.issues.listComments(createdIssue.id, companyId);
+    expect(commentsAfterAck).toHaveLength(2);
+    expect(commentsAfterAck.at(-1)?.body).toContain("GitHub outbound intake acknowledgement posted");
+    expect(commentsAfterAck.at(-1)?.body).toContain("GitHub comment id: `9001`");
+
+    const ackEchoPayload = {
+      action: "created",
+      repository: { full_name: "tensorleap/concierge" },
+      sender: { login: "paperclip-bot" },
+      issue: {
+        number: 17,
+        title: "Improve onboarding instructions",
+        body: "Make Concierge handoff clearer for new repos.",
+        html_url: "https://github.com/tensorleap/concierge/issues/17",
+        assignees: [{ login: "marvin-tensorleap" }],
+      },
+      comment: {
+        id: 9001,
+        body: "<!-- paperclip-github-outbound:intake_acknowledgement -->\nPaperclip mirrored this issue as `TEN-1`.",
+        html_url: "https://github.com/tensorleap/concierge/issues/17#issuecomment-9001",
+        user: { login: "paperclip-bot" },
+      },
+    };
+    const ackEchoBody = JSON.stringify(ackEchoPayload);
+    await plugin.definition.onWebhook?.({
+      endpointKey: "github",
+      requestId: "req-ack-2",
+      headers: {
+        "x-github-delivery": "delivery-ack-2",
+        "x-github-event": "issue_comment",
+        "x-hub-signature-256": signWebhook(secretRef, ackEchoBody),
+      },
+      rawBody: ackEchoBody,
+      parsedBody: ackEchoPayload,
+    });
+
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    const commentsAfterEcho = await harness.ctx.issues.listComments(createdIssue.id, companyId);
+    expect(commentsAfterEcho).toHaveLength(2);
+    expect(
+      harness.getState({
+        scopeKind: "company",
+        scopeId: companyId,
+        stateKey: "github:issue:tensorleap/concierge#17",
+      }),
+    ).toEqual(expect.objectContaining({
+      intakeAcknowledgedAt: expect.any(String),
+      outboundCommentIds: [9001],
+      lastOutboundCommentKind: "intake_acknowledgement",
+    }));
+  });
+
+  it("posts one final saveback when a non-plugin Paperclip update moves the mirrored issue to done", async () => {
+    const companyId = randomUUID();
+    const projectId = randomUUID();
+    const ceoAgentId = randomUUID();
+    const secretRef = randomUUID();
+    const writeTokenSecretRef = randomUUID();
+    const fetchMock = vi.fn()
+      .mockResolvedValueOnce(new Response(JSON.stringify({
+        id: 9001,
+        html_url: "https://github.com/tensorleap/concierge/issues/17#issuecomment-9001",
+      }), {
+        status: 201,
+        headers: { "content-type": "application/json" },
+      }))
+      .mockResolvedValueOnce(new Response(JSON.stringify({
+        id: 9002,
+        html_url: "https://github.com/tensorleap/concierge/issues/17#issuecomment-9002",
+      }), {
+        status: 201,
+        headers: { "content-type": "application/json" },
+      }));
+    vi.stubGlobal("fetch", fetchMock);
+
+    const harness = createTestHarness({
+      manifest,
+      capabilities: [...manifest.capabilities, "issue.comments.read"],
+      config: buildConfig({
+        companyId,
+        projectId,
+        assigneeAgentId: ceoAgentId,
+        secretRef,
+        outboundCommentPolicy: "acknowledge_and_saveback_done",
+        githubWriteTokenSecretRef: writeTokenSecretRef,
+      }),
+    });
+    await plugin.definition.setup(harness.ctx);
+
+    const payload = {
+      action: "assigned",
+      repository: { full_name: "tensorleap/concierge" },
+      sender: { login: "octocat" },
+      assignee: { login: "marvin-tensorleap" },
+      issue: {
+        number: 17,
+        title: "Improve onboarding instructions",
+        body: "Make Concierge handoff clearer for new repos.",
+        html_url: "https://github.com/tensorleap/concierge/issues/17",
+        assignees: [{ login: "marvin-tensorleap" }],
+      },
+    };
+    const rawBody = JSON.stringify(payload);
+    await plugin.definition.onWebhook?.({
+      endpointKey: "github",
+      requestId: "req-saveback-1",
+      headers: {
+        "x-github-delivery": "delivery-saveback-1",
+        "x-github-event": "issues",
+        "x-hub-signature-256": signWebhook(secretRef, rawBody),
+      },
+      rawBody,
+      parsedBody: payload,
+    });
+
+    const createdIssue = (await harness.ctx.issues.list({ companyId }))[0]!;
+    await harness.ctx.issues.update(createdIssue.id, { status: "done" }, companyId);
+    await harness.emit(
+      "issue.updated",
+      {
+        identifier: createdIssue.identifier,
+        patch: { status: "done" },
+        _previous: { status: "todo" },
+      },
+      {
+        companyId,
+        entityId: createdIssue.id,
+        entityType: "issue",
+        actorType: "agent",
+        actorId: ceoAgentId,
+      },
+    );
+
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+    expect(String(fetchMock.mock.calls[1]?.[1]?.body ?? "")).toContain("<!-- paperclip-github-outbound:final_saveback_done -->");
+    expect(String(fetchMock.mock.calls[1]?.[1]?.body ?? "")).toContain(createdIssue.identifier ?? createdIssue.id);
+
+    const comments = await harness.ctx.issues.listComments(createdIssue.id, companyId);
+    expect(comments).toHaveLength(3);
+    expect(comments.at(-1)?.body).toContain("GitHub final saveback posted");
+    expect(comments.at(-1)?.body).toContain("GitHub comment id: `9002`");
+
+    await harness.emit(
+      "issue.updated",
+      {
+        identifier: createdIssue.identifier,
+        patch: { title: "Retitled after completion" },
+        _previous: { status: "done" },
+      },
+      {
+        companyId,
+        entityId: createdIssue.id,
+        entityType: "issue",
+        actorType: "plugin",
+        actorId: manifest.id,
+      },
+    );
+
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+    expect(
+      harness.getState({
+        scopeKind: "company",
+        scopeId: companyId,
+        stateKey: "github:issue:tensorleap/concierge#17",
+      }),
+    ).toEqual(expect.objectContaining({
+      finalSavebackState: "done",
+      outboundCommentIds: [9001, 9002],
+      lastOutboundCommentKind: "final_saveback_done",
     }));
   });
 
