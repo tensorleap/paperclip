@@ -170,7 +170,7 @@ describe("github concierge webhook plugin", () => {
     const ceoAgentId = randomUUID();
     const secretRef = randomUUID();
     const writeTokenSecretRef = randomUUID();
-    const fetchMock = vi.fn(async () => new Response(JSON.stringify({
+    const fetchMock = vi.fn<typeof fetch>(async () => new Response(JSON.stringify({
       id: 9001,
       html_url: "https://github.com/tensorleap/concierge/issues/17#issuecomment-9001",
     }), {
@@ -282,7 +282,7 @@ describe("github concierge webhook plugin", () => {
     const ceoAgentId = randomUUID();
     const secretRef = randomUUID();
     const writeTokenSecretRef = randomUUID();
-    const fetchMock = vi.fn()
+    const fetchMock = vi.fn<typeof fetch>()
       .mockResolvedValueOnce(new Response(JSON.stringify({
         id: 9001,
         html_url: "https://github.com/tensorleap/concierge/issues/17#issuecomment-9001",
