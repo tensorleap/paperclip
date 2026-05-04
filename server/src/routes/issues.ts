@@ -1507,14 +1507,15 @@ export function issueRoutes(
     }
     assertCompanyAccess(req, issue.companyId);
     if (!(await assertAgentIssueMutationAllowed(req, res, issue))) return;
-    const product = await workProductsSvc.createForIssue(issue.id, issue.companyId, {
+    const result = await workProductsSvc.upsertForIssue(issue.id, issue.companyId, {
       ...req.body,
       projectId: req.body.projectId ?? issue.projectId ?? null,
     });
-    if (!product) {
+    if (!result) {
       res.status(422).json({ error: "Invalid work product payload" });
       return;
     }
+    const { product, created } = result;
     const actor = getActorInfo(req);
     await logActivity(db, {
       companyId: issue.companyId,
@@ -1522,12 +1523,20 @@ export function issueRoutes(
       actorId: actor.actorId,
       agentId: actor.agentId,
       runId: actor.runId,
-      action: "issue.work_product_created",
+      action: created ? "issue.work_product_created" : "issue.work_product_updated",
       entityType: "issue",
       entityId: issue.id,
-      details: { workProductId: product.id, type: product.type, provider: product.provider },
+      details: created
+        ? { workProductId: product.id, type: product.type, provider: product.provider, externalId: product.externalId }
+        : {
+            workProductId: product.id,
+            type: product.type,
+            provider: product.provider,
+            externalId: product.externalId,
+            changedKeys: Object.keys(req.body).sort(),
+          },
     });
-    res.status(201).json(product);
+    res.status(created ? 201 : 200).json(product);
   });
 
   router.patch("/work-products/:id", validate(updateIssueWorkProductSchema), async (req, res) => {

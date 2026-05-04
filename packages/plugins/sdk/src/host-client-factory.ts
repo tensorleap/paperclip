@@ -167,7 +167,7 @@ export interface HostServices {
     getWorkspaceForIssue(params: WorkerToHostMethods["projects.getWorkspaceForIssue"][0]): Promise<WorkerToHostMethods["projects.getWorkspaceForIssue"][1]>;
   };
 
-  /** Provides issue read/write, relation, checkout, wakeup, summary, comment methods. */
+  /** Provides issue read/write, work-product, relation, checkout, wakeup, summary, and comment methods. */
   issues: {
     list(params: WorkerToHostMethods["issues.list"][0]): Promise<WorkerToHostMethods["issues.list"][1]>;
     get(params: WorkerToHostMethods["issues.get"][0]): Promise<WorkerToHostMethods["issues.get"][1]>;
@@ -184,6 +184,9 @@ export interface HostServices {
     getOrchestrationSummary(params: WorkerToHostMethods["issues.summaries.getOrchestration"][0]): Promise<WorkerToHostMethods["issues.summaries.getOrchestration"][1]>;
     listComments(params: WorkerToHostMethods["issues.listComments"][0]): Promise<WorkerToHostMethods["issues.listComments"][1]>;
     createComment(params: WorkerToHostMethods["issues.createComment"][0]): Promise<WorkerToHostMethods["issues.createComment"][1]>;
+    listWorkProducts(params: WorkerToHostMethods["issues.workProducts.list"][0]): Promise<WorkerToHostMethods["issues.workProducts.list"][1]>;
+    findWorkProducts(params: WorkerToHostMethods["issues.workProducts.find"][0]): Promise<WorkerToHostMethods["issues.workProducts.find"][1]>;
+    upsertWorkProduct(params: WorkerToHostMethods["issues.workProducts.upsert"][0]): Promise<WorkerToHostMethods["issues.workProducts.upsert"][1]>;
     createInteraction(params: WorkerToHostMethods["issues.createInteraction"][0]): Promise<WorkerToHostMethods["issues.createInteraction"][1]>;
   };
 
@@ -343,6 +346,9 @@ const METHOD_CAPABILITY_MAP: Record<WorkerToHostMethodName, PluginCapability | n
   "issues.summaries.getOrchestration": "issues.orchestration.read",
   "issues.listComments": "issue.comments.read",
   "issues.createComment": "issue.comments.create",
+  "issues.workProducts.list": "issue.work_products.read",
+  "issues.workProducts.find": "issue.work_products.read",
+  "issues.workProducts.upsert": "issue.work_products.write",
   "issues.createInteraction": "issue.interactions.create",
 
   // Issue Documents
@@ -576,6 +582,15 @@ export function createHostClientHandlers(
     }),
     "issues.createComment": gated("issues.createComment", async (params) => {
       return services.issues.createComment(params);
+    }),
+    "issues.workProducts.list": gated("issues.workProducts.list", async (params) => {
+      return services.issues.listWorkProducts(params);
+    }),
+    "issues.workProducts.find": gated("issues.workProducts.find", async (params) => {
+      return services.issues.findWorkProducts(params);
+    }),
+    "issues.workProducts.upsert": gated("issues.workProducts.upsert", async (params) => {
+      return services.issues.upsertWorkProduct(params);
     }),
     "issues.createInteraction": gated("issues.createInteraction", async (params) => {
       return services.issues.createInteraction(params);

@@ -115,6 +115,78 @@ describe("plugin SDK orchestration contract", () => {
     });
   });
 
+  it("supports issue work product upserts in the test harness", async () => {
+    const companyId = randomUUID();
+    const issueId = randomUUID();
+    const harness = createTestHarness({
+      manifest: manifest(["issue.work_products.read", "issue.work_products.write"]),
+    });
+    harness.seed({
+      issues: [issue({ id: issueId, companyId, title: "Execution issue" })],
+    });
+
+    const created = await harness.ctx.issues.workProducts.upsert({
+      issueId,
+      companyId,
+      type: "pull_request",
+      provider: "github",
+      externalId: "tensorleap/concierge#28",
+      title: "Clarify onboarding docs",
+      url: "https://github.com/tensorleap/concierge/pull/28",
+      status: "ready_for_review",
+      reviewState: "none",
+      isPrimary: true,
+      healthStatus: "healthy",
+      metadata: {
+        repositoryFullName: "tensorleap/concierge",
+        pullRequestNumber: 28,
+      },
+    });
+
+    const updated = await harness.ctx.issues.workProducts.upsert({
+      issueId,
+      companyId,
+      type: "pull_request",
+      provider: "github",
+      externalId: "tensorleap/concierge#28",
+      title: "Clarify onboarding docs v2",
+      url: "https://github.com/tensorleap/concierge/pull/28",
+      status: "merged",
+      reviewState: "none",
+      isPrimary: true,
+      healthStatus: "healthy",
+      metadata: {
+        repositoryFullName: "tensorleap/concierge",
+        pullRequestNumber: 28,
+        merged: true,
+      },
+    });
+
+    expect(updated.id).toBe(created.id);
+    await expect(harness.ctx.issues.workProducts.list(issueId, companyId)).resolves.toEqual([
+      expect.objectContaining({
+        id: created.id,
+        externalId: "tensorleap/concierge#28",
+        title: "Clarify onboarding docs v2",
+        status: "merged",
+        metadata: expect.objectContaining({ merged: true }),
+      }),
+    ]);
+    await expect(harness.ctx.issues.workProducts.find({
+      companyId,
+      type: "pull_request",
+      provider: "github",
+      externalId: "tensorleap/concierge#28",
+    })).resolves.toEqual([
+      expect.objectContaining({
+        id: created.id,
+        issueId,
+        externalId: "tensorleap/concierge#28",
+        title: "Clarify onboarding docs v2",
+      }),
+    ]);
+  });
+
   it("enforces plugin origin namespaces in the test harness", async () => {
     const companyId = randomUUID();
     const harness = createTestHarness({

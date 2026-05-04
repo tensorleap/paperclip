@@ -29,6 +29,7 @@ import { issueService } from "./issues.js";
 import { issueThreadInteractionService } from "./issue-thread-interactions.js";
 import { goalService } from "./goals.js";
 import { documentService } from "./documents.js";
+import { workProductService } from "./work-products.js";
 import { heartbeatService } from "./heartbeat.js";
 import { budgetService } from "./budgets.js";
 import { issueApprovalService } from "./issue-approvals.js";
@@ -474,6 +475,7 @@ export function buildHostServices(
   const projects = projectService(db);
   const issues = issueService(db);
   const documents = documentService(db);
+  const workProducts = workProductService(db);
   const goals = goalService(db);
   const activity = activityService(db);
   const costs = costService(db);
@@ -1510,6 +1512,49 @@ export function buildHostServices(
           },
         });
         return comment;
+      },
+      async listWorkProducts(params) {
+        const companyId = ensureCompanyId(params.companyId);
+        await ensurePluginAvailableForCompany(companyId);
+        requireInCompany("Issue", await issues.getById(params.issueId), companyId);
+        return await workProducts.listForIssue(params.issueId);
+      },
+      async findWorkProducts(params) {
+        const companyId = ensureCompanyId(params.companyId);
+        await ensurePluginAvailableForCompany(companyId);
+        return await workProducts.listByExternalId({
+          companyId,
+          type: params.type,
+          provider: params.provider,
+          externalId: params.externalId,
+        });
+      },
+      async upsertWorkProduct(params) {
+        const companyId = ensureCompanyId(params.companyId);
+        await ensurePluginAvailableForCompany(companyId);
+        const issue = requireInCompany("Issue", await issues.getById(params.issueId), companyId);
+        const result = await workProducts.upsertForIssue(params.issueId, companyId, {
+          ...params.product,
+          projectId: params.product.projectId ?? issue.projectId ?? null,
+        });
+        if (!result) {
+          throw new Error("Failed to upsert issue work product");
+        }
+        await logPluginActivity({
+          companyId,
+          action: result.created ? "issue.work_product_created" : "issue.work_product_updated",
+          entityType: "issue",
+          entityId: issue.id,
+          details: {
+            identifier: issue.identifier,
+            workProductId: result.product.id,
+            type: result.product.type,
+            provider: result.product.provider,
+            externalId: result.product.externalId,
+            changedKeys: result.created ? undefined : Object.keys(params.product).sort(),
+          },
+        });
+        return result.product;
       },
       async createInteraction(params) {
         const companyId = ensureCompanyId(params.companyId);

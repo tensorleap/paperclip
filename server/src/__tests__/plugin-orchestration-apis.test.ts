@@ -10,6 +10,7 @@ import {
   createDb,
   heartbeatRuns,
   issueRelations,
+  issueWorkProducts,
   issues,
 } from "@paperclipai/db";
 import {
@@ -57,6 +58,7 @@ describeEmbeddedPostgres("plugin orchestration APIs", () => {
     await db.delete(heartbeatRuns);
     await db.delete(agentWakeupRequests);
     await db.delete(issueRelations);
+    await db.delete(issueWorkProducts);
     await db.delete(issues);
     await db.delete(agents);
     await db.delete(companies);
@@ -156,6 +158,109 @@ describeEmbeddedPostgres("plugin orchestration APIs", () => {
             initiatingRunId: originRunId,
           }),
         }),
+      ]),
+    );
+  });
+
+  it("upserts durable pull request work products for plugin-linked issues", async () => {
+    const { companyId } = await seedCompanyAndAgent();
+    const issueId = randomUUID();
+    await db.insert(issues).values({
+      id: issueId,
+      companyId,
+      title: "Linked issue",
+      status: "todo",
+      priority: "medium",
+      identifier: `${issuePrefix(companyId)}-issue`,
+    });
+
+    const services = buildHostServices(db, "plugin-record-id", "paperclip.missions", createEventBusStub());
+    const created = await services.issues.upsertWorkProduct({
+      issueId,
+      companyId,
+      product: {
+        type: "pull_request",
+        provider: "github",
+        externalId: "tensorleap/concierge#28",
+        title: "Clarify onboarding docs",
+        url: "https://github.com/tensorleap/concierge/pull/28",
+        status: "ready_for_review",
+        reviewState: "none",
+        isPrimary: true,
+        healthStatus: "healthy",
+        metadata: {
+          repositoryFullName: "tensorleap/concierge",
+          pullRequestNumber: 28,
+          state: "open",
+          merged: false,
+        },
+      },
+    });
+
+    const updated = await services.issues.upsertWorkProduct({
+      issueId,
+      companyId,
+      product: {
+        type: "pull_request",
+        provider: "github",
+        externalId: "tensorleap/concierge#28",
+        title: "Clarify onboarding docs",
+        url: "https://github.com/tensorleap/concierge/pull/28",
+        status: "merged",
+        reviewState: "none",
+        isPrimary: true,
+        healthStatus: "healthy",
+        metadata: {
+          repositoryFullName: "tensorleap/concierge",
+          pullRequestNumber: 28,
+          state: "closed",
+          merged: true,
+        },
+      },
+    });
+
+    expect(updated.id).toBe(created.id);
+    const stored = await db
+      .select()
+      .from(issueWorkProducts)
+      .where(eq(issueWorkProducts.issueId, issueId));
+    expect(stored).toHaveLength(1);
+    expect(stored[0]).toEqual(expect.objectContaining({
+      externalId: "tensorleap/concierge#28",
+      status: "merged",
+      metadata: expect.objectContaining({ merged: true, state: "closed" }),
+    }));
+    await expect(services.issues.listWorkProducts({ issueId, companyId })).resolves.toEqual([
+      expect.objectContaining({
+        id: created.id,
+        externalId: "tensorleap/concierge#28",
+        status: "merged",
+      }),
+    ]);
+    await expect(
+      services.issues.findWorkProducts({
+        companyId,
+        type: "pull_request",
+        provider: "github",
+        externalId: "tensorleap/concierge#28",
+      }),
+    ).resolves.toEqual([
+      expect.objectContaining({
+        id: created.id,
+        issueId,
+        externalId: "tensorleap/concierge#28",
+        status: "merged",
+      }),
+    ]);
+
+    const activities = await db
+      .select()
+      .from(activityLog)
+      .where(and(eq(activityLog.entityType, "issue"), eq(activityLog.entityId, issueId)));
+    expect(activities).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ action: "issue.work_product_created" }),
+        expect.objectContaining({ action: "issue.work_product_updated" }),
       ]),
     );
   });

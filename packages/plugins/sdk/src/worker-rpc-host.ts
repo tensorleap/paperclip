@@ -705,6 +705,45 @@ export function startWorkerRpcHost(options: WorkerRpcHostOptions): WorkerRpcHost
           return callHost("issues.createComment", { issueId, body, companyId, authorAgentId: options?.authorAgentId });
         },
 
+        workProducts: {
+          async list(issueId: string, companyId: string) {
+            return callHost("issues.workProducts.list", { issueId, companyId });
+          },
+
+          async find(input) {
+            return callHost("issues.workProducts.find", {
+              companyId: input.companyId,
+              type: input.type,
+              provider: input.provider,
+              externalId: input.externalId,
+            });
+          },
+
+          async upsert(input) {
+            return callHost("issues.workProducts.upsert", {
+              issueId: input.issueId,
+              companyId: input.companyId,
+              product: {
+                projectId: input.projectId,
+                executionWorkspaceId: input.executionWorkspaceId,
+                runtimeServiceId: input.runtimeServiceId,
+                type: input.type,
+                provider: input.provider,
+                externalId: input.externalId,
+                title: input.title,
+                url: input.url,
+                status: input.status,
+                reviewState: input.reviewState,
+                isPrimary: input.isPrimary,
+                healthStatus: input.healthStatus,
+                summary: input.summary,
+                metadata: input.metadata,
+                createdByRunId: input.createdByRunId,
+              },
+            });
+          },
+        },
+
         async createInteraction(issueId: string, interaction, companyId: string, options?: { authorAgentId?: string }) {
           return callHost("issues.createInteraction", {
             issueId,

@@ -11,6 +11,7 @@ import type {
   IssueThreadInteraction,
   CreateIssueThreadInteraction,
   IssueDocument,
+  IssueWorkProduct,
   Agent,
   Goal,
 } from "@paperclipai/shared";
@@ -69,6 +70,7 @@ export interface TestHarness {
     projects?: Project[];
     issues?: Issue[];
     issueComments?: IssueComment[];
+    issueWorkProducts?: IssueWorkProduct[];
     agents?: Agent[];
     goals?: Goal[];
   }): void;
@@ -424,6 +426,7 @@ export function createTestHarness(options: TestHarnessOptions): TestHarness {
   const issueComments = new Map<string, IssueComment[]>();
   const issueInteractions = new Map<string, IssueThreadInteraction[]>();
   const issueDocuments = new Map<string, IssueDocument>();
+  const issueWorkProducts = new Map<string, IssueWorkProduct>();
   const agents = new Map<string, Agent>();
   const goals = new Map<string, Goal>();
   const projectWorkspaces = new Map<string, PluginWorkspace[]>();
@@ -462,6 +465,68 @@ export function createTestHarness(options: TestHarnessOptions): TestHarness {
       .map(([blockedIssueId]) => summarize(blockedIssueId))
       .filter((value): value is NonNullable<typeof value> => value !== null);
     return { blockedBy, blocks };
+  }
+
+  function listIssueWorkProducts(issueId: string, companyId: string): IssueWorkProduct[] {
+    return [...issueWorkProducts.values()]
+      .filter((product) => product.issueId === issueId && product.companyId === companyId)
+      .sort((left, right) => {
+        if (left.isPrimary !== right.isPrimary) return left.isPrimary ? -1 : 1;
+        return right.updatedAt.getTime() - left.updatedAt.getTime();
+      });
+  }
+
+  function findIssueWorkProductsByExternalId(input: {
+    companyId: string;
+    type: IssueWorkProduct["type"];
+    provider: string;
+    externalId: string;
+  }): IssueWorkProduct[] {
+    return [...issueWorkProducts.values()]
+      .filter((product) =>
+        product.companyId === input.companyId
+        && product.type === input.type
+        && product.provider === input.provider
+        && product.externalId === input.externalId,
+      )
+      .sort((left, right) => {
+        if (left.isPrimary !== right.isPrimary) return left.isPrimary ? -1 : 1;
+        return right.updatedAt.getTime() - left.updatedAt.getTime();
+      });
+  }
+
+  function findIssueWorkProductByExternalId(input: {
+    issueId: string;
+    companyId: string;
+    type: IssueWorkProduct["type"];
+    provider: string;
+    externalId: string;
+  }): IssueWorkProduct | null {
+    return listIssueWorkProducts(input.issueId, input.companyId).find((product) =>
+      product.type === input.type
+      && product.provider === input.provider
+      && product.externalId === input.externalId
+    ) ?? null;
+  }
+
+  function clearPrimaryIssueWorkProducts(issueId: string, companyId: string, type: IssueWorkProduct["type"], excludeId?: string): void {
+    const now = new Date();
+    for (const product of issueWorkProducts.values()) {
+      if (
+        product.issueId !== issueId
+        || product.companyId !== companyId
+        || product.type !== type
+        || product.id === excludeId
+        || product.isPrimary === false
+      ) {
+        continue;
+      }
+      issueWorkProducts.set(product.id, {
+        ...product,
+        isPrimary: false,
+        updatedAt: now,
+      });
+    }
   }
 
   const defaultPluginOriginKind: PluginIssueOriginKind = `plugin:${manifest.id}`;
@@ -820,6 +885,64 @@ export function createTestHarness(options: TestHarnessOptions): TestHarness {
         current.push(comment);
         issueComments.set(issueId, current);
         return comment;
+      },
+      workProducts: {
+        async list(issueId, companyId) {
+          requireCapability(manifest, capabilitySet, "issue.work_products.read");
+          if (!isInCompany(issues.get(issueId), companyId)) return [];
+          return listIssueWorkProducts(issueId, companyId);
+        },
+        async find(input) {
+          requireCapability(manifest, capabilitySet, "issue.work_products.read");
+          return findIssueWorkProductsByExternalId(input);
+        },
+        async upsert(input) {
+          requireCapability(manifest, capabilitySet, "issue.work_products.write");
+          const parentIssue = issues.get(input.issueId);
+          if (!isInCompany(parentIssue, input.companyId)) {
+            throw new Error(`Issue not found: ${input.issueId}`);
+          }
+
+          const now = new Date();
+          const existing = input.externalId
+            ? findIssueWorkProductByExternalId({
+                issueId: input.issueId,
+                companyId: input.companyId,
+                type: input.type,
+                provider: input.provider,
+                externalId: input.externalId,
+              })
+            : null;
+          const nextIsPrimary = input.isPrimary ?? existing?.isPrimary ?? false;
+          if (nextIsPrimary) {
+            clearPrimaryIssueWorkProducts(input.issueId, input.companyId, input.type, existing?.id);
+          }
+
+          const product: IssueWorkProduct = {
+            id: existing?.id ?? randomUUID(),
+            companyId: input.companyId,
+            projectId: input.projectId ?? existing?.projectId ?? parentIssue.projectId ?? null,
+            issueId: input.issueId,
+            executionWorkspaceId: input.executionWorkspaceId ?? existing?.executionWorkspaceId ?? null,
+            runtimeServiceId: input.runtimeServiceId ?? existing?.runtimeServiceId ?? null,
+            type: input.type,
+            provider: input.provider,
+            externalId: input.externalId ?? existing?.externalId ?? null,
+            title: input.title,
+            url: input.url ?? existing?.url ?? null,
+            status: input.status,
+            reviewState: input.reviewState,
+            isPrimary: nextIsPrimary,
+            healthStatus: input.healthStatus,
+            summary: input.summary ?? existing?.summary ?? null,
+            metadata: input.metadata ?? existing?.metadata ?? null,
+            createdByRunId: existing?.createdByRunId ?? input.createdByRunId ?? null,
+            createdAt: existing?.createdAt ?? now,
+            updatedAt: now,
+          };
+          issueWorkProducts.set(product.id, product);
+          return product;
+        },
       },
       async createInteraction(issueId, interaction, companyId, options) {
         requireCapability(manifest, capabilitySet, "issue.interactions.create");
@@ -1228,6 +1351,9 @@ export function createTestHarness(options: TestHarnessOptions): TestHarness {
         const list = issueComments.get(row.issueId) ?? [];
         list.push(row);
         issueComments.set(row.issueId, list);
+      }
+      for (const row of input.issueWorkProducts ?? []) {
+        issueWorkProducts.set(row.id, row);
       }
       for (const row of input.agents ?? []) agents.set(row.id, row);
       for (const row of input.goals ?? []) goals.set(row.id, row);

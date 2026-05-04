@@ -193,6 +193,7 @@ export type {
   PluginCompaniesClient,
   PluginIssuesClient,
   PluginIssueMutationActor,
+  PluginIssueWorkProductsClient,
   PluginIssueRelationsClient,
   PluginIssueRelationSummary,
   PluginIssueCheckoutOwnership,

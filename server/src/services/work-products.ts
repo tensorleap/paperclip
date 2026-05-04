@@ -1,9 +1,18 @@
-import { and, desc, eq } from "drizzle-orm";
+import { and, desc, eq, ne } from "drizzle-orm";
 import type { Db } from "@paperclipai/db";
 import { issueWorkProducts } from "@paperclipai/db";
 import type { IssueWorkProduct } from "@paperclipai/shared";
 
 type IssueWorkProductRow = typeof issueWorkProducts.$inferSelect;
+
+export interface UpsertIssueWorkProductResult {
+  created: boolean;
+  product: IssueWorkProduct;
+}
+
+function preferProvided<T>(value: T | undefined, fallback: T): T {
+  return value === undefined ? fallback : value;
+}
 
 function toIssueWorkProduct(row: IssueWorkProductRow): IssueWorkProduct {
   return {
@@ -37,6 +46,27 @@ export function workProductService(db: Db) {
         .select()
         .from(issueWorkProducts)
         .where(eq(issueWorkProducts.issueId, issueId))
+        .orderBy(desc(issueWorkProducts.isPrimary), desc(issueWorkProducts.updatedAt));
+      return rows.map(toIssueWorkProduct);
+    },
+
+    listByExternalId: async (input: {
+      companyId: string;
+      type: IssueWorkProduct["type"];
+      provider: string;
+      externalId: string;
+    }) => {
+      const rows = await db
+        .select()
+        .from(issueWorkProducts)
+        .where(
+          and(
+            eq(issueWorkProducts.companyId, input.companyId),
+            eq(issueWorkProducts.type, input.type),
+            eq(issueWorkProducts.provider, input.provider),
+            eq(issueWorkProducts.externalId, input.externalId),
+          ),
+        )
         .orderBy(desc(issueWorkProducts.isPrimary), desc(issueWorkProducts.updatedAt));
       return rows.map(toIssueWorkProduct);
     },
@@ -75,6 +105,126 @@ export function workProductService(db: Db) {
           .then((rows) => rows[0] ?? null);
       });
       return row ? toIssueWorkProduct(row) : null;
+    },
+
+    upsertForIssue: async (
+      issueId: string,
+      companyId: string,
+      data: Omit<typeof issueWorkProducts.$inferInsert, "issueId" | "companyId">,
+    ): Promise<UpsertIssueWorkProductResult | null> => {
+      const result = await db.transaction(async (tx) => {
+        if (!data.externalId) {
+          if (data.isPrimary) {
+            await tx
+              .update(issueWorkProducts)
+              .set({ isPrimary: false, updatedAt: new Date() })
+              .where(
+                and(
+                  eq(issueWorkProducts.companyId, companyId),
+                  eq(issueWorkProducts.issueId, issueId),
+                  eq(issueWorkProducts.type, data.type),
+                ),
+              );
+          }
+          const createdRow = await tx
+            .insert(issueWorkProducts)
+            .values({
+              ...data,
+              companyId,
+              issueId,
+            })
+            .returning()
+            .then((rows) => rows[0] ?? null);
+          return createdRow
+            ? { created: true, row: createdRow }
+            : null;
+        }
+
+        const existing = await tx
+          .select()
+          .from(issueWorkProducts)
+          .where(
+            and(
+              eq(issueWorkProducts.companyId, companyId),
+              eq(issueWorkProducts.issueId, issueId),
+              eq(issueWorkProducts.type, data.type),
+              eq(issueWorkProducts.provider, data.provider),
+              eq(issueWorkProducts.externalId, data.externalId),
+            ),
+          )
+          .then((rows) => rows[0] ?? null);
+
+        if (existing) {
+          const nextIsPrimary = preferProvided(data.isPrimary, existing.isPrimary);
+          if (nextIsPrimary) {
+            await tx
+              .update(issueWorkProducts)
+              .set({ isPrimary: false, updatedAt: new Date() })
+              .where(
+                and(
+                  eq(issueWorkProducts.companyId, companyId),
+                  eq(issueWorkProducts.issueId, issueId),
+                  eq(issueWorkProducts.type, existing.type),
+                  ne(issueWorkProducts.id, existing.id),
+                ),
+              );
+          }
+
+          const updatedRow = await tx
+            .update(issueWorkProducts)
+            .set({
+              projectId: preferProvided(data.projectId, existing.projectId),
+              executionWorkspaceId: preferProvided(data.executionWorkspaceId, existing.executionWorkspaceId),
+              runtimeServiceId: preferProvided(data.runtimeServiceId, existing.runtimeServiceId),
+              title: data.title,
+              url: preferProvided(data.url, existing.url),
+              status: data.status,
+              reviewState: data.reviewState,
+              isPrimary: nextIsPrimary,
+              healthStatus: data.healthStatus,
+              summary: preferProvided(data.summary, existing.summary),
+              metadata: preferProvided(data.metadata, existing.metadata),
+              createdByRunId: existing.createdByRunId ?? data.createdByRunId ?? null,
+              updatedAt: new Date(),
+            })
+            .where(eq(issueWorkProducts.id, existing.id))
+            .returning()
+            .then((rows) => rows[0] ?? null);
+          return updatedRow
+            ? { created: false, row: updatedRow }
+            : null;
+        }
+
+        if (data.isPrimary) {
+          await tx
+            .update(issueWorkProducts)
+            .set({ isPrimary: false, updatedAt: new Date() })
+            .where(
+              and(
+                eq(issueWorkProducts.companyId, companyId),
+                eq(issueWorkProducts.issueId, issueId),
+                eq(issueWorkProducts.type, data.type),
+              ),
+            );
+        }
+
+        const createdRow = await tx
+          .insert(issueWorkProducts)
+          .values({
+            ...data,
+            companyId,
+            issueId,
+          })
+          .returning()
+          .then((rows) => rows[0] ?? null);
+        return createdRow
+          ? { created: true, row: createdRow }
+          : null;
+      });
+
+      return result
+        ? { created: result.created, product: toIssueWorkProduct(result.row) }
+        : null;
     },
 
     update: async (id: string, patch: Partial<typeof issueWorkProducts.$inferInsert>) => {

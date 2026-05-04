@@ -21,12 +21,14 @@ import type {
   IssueComment,
   IssueDocument,
   IssueDocumentSummary,
+  IssueWorkProduct,
   IssueRelationIssueSummary,
   IssueThreadInteraction,
   SuggestTasksInteraction,
   AskUserQuestionsInteraction,
   RequestConfirmationInteraction,
   CreateIssueThreadInteraction,
+  CreateIssueWorkProduct,
   PluginIssueOriginKind,
   Agent,
   Goal,
@@ -85,12 +87,14 @@ export type {
   IssueComment,
   IssueDocument,
   IssueDocumentSummary,
+  IssueWorkProduct,
   IssueRelationIssueSummary,
   IssueThreadInteraction,
   SuggestTasksInteraction,
   AskUserQuestionsInteraction,
   RequestConfirmationInteraction,
   CreateIssueThreadInteraction,
+  CreateIssueWorkProduct,
   PluginIssueOriginKind,
   Agent,
   Goal,
@@ -839,6 +843,37 @@ export interface PluginCompaniesClient {
 }
 
 /**
+ * `ctx.issues.workProducts` — read and upsert issue work products.
+ *
+ * Requires:
+ * - `issue.work_products.read` for `list`
+ * - `issue.work_products.write` for `upsert`
+ */
+export interface PluginIssueWorkProductsClient {
+  /** List work products attached to an issue. Requires `issue.work_products.read`. */
+  list(issueId: string, companyId: string): Promise<IssueWorkProduct[]>;
+
+  /** Find work products by provider external ID across a company. Requires `issue.work_products.read`. */
+  find(input: {
+    companyId: string;
+    type: IssueWorkProduct["type"];
+    provider: string;
+    externalId: string;
+  }): Promise<IssueWorkProduct[]>;
+
+  /**
+   * Create or update a work product on an issue.
+   *
+   * If `externalId` is provided and a work product already exists for the same
+   * issue, type, provider, and externalId, the existing row is updated in place.
+   * Otherwise a new work product row is created.
+   *
+   * Requires `issue.work_products.write`.
+   */
+  upsert(input: CreateIssueWorkProduct & { issueId: string; companyId: string }): Promise<IssueWorkProduct>;
+}
+
+/**
  * `ctx.issues.documents` — read and write issue documents.
  *
  * Requires:
@@ -1090,6 +1125,8 @@ export interface PluginIssueSummariesClient {
  * - `issue.comments.read` for `listComments`
  * - `issue.comments.create` for `createComment`
  * - `issue.interactions.create` for `createInteraction`, `suggestTasks`, `askUserQuestions`, and `requestConfirmation`
+ * - `issue.work_products.read` for `workProducts.list` and `workProducts.find`
+ * - `issue.work_products.write` for `workProducts.upsert`
  * - `issue.documents.read` for `documents.list` and `documents.get`
  * - `issue.documents.write` for `documents.upsert` and `documents.delete`
  */
@@ -1218,6 +1255,8 @@ export interface PluginIssuesClient {
     companyId: string,
     options?: { authorAgentId?: string },
   ): Promise<RequestConfirmationInteraction>;
+  /** Read and upsert issue work products. Requires `issue.work_products.read` / `issue.work_products.write`. */
+  workProducts: PluginIssueWorkProductsClient;
   /** Read and write issue documents. Requires `issue.documents.read` / `issue.documents.write`. */
   documents: PluginIssueDocumentsClient;
   /** Read and write blocker relationships. */
