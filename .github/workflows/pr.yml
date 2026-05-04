@@ -71,13 +71,8 @@ jobs:
           node-version: 24
           cache: pnpm
 
-      - name: Refresh lockfile if new workspace packages added
-        run: |
-          changed="$(git diff --name-only "${{ github.event.pull_request.base.sha }}" "${{ github.event.pull_request.head.sha }}")"
-          manifest_pattern='(^|/)package\.json$|^pnpm-workspace\.yaml$|^\.npmrc$|^pnpmfile\.(cjs|js|mjs)$'
-          if printf '%s\n' "$changed" | grep -Eq "$manifest_pattern"; then
-            pnpm install --lockfile-only --ignore-scripts --no-frozen-lockfile
-          fi
+      - name: Refresh lockfile if outdated
+        run: pnpm install --lockfile-only --ignore-scripts --no-frozen-lockfile
 
       - name: Install dependencies
         run: pnpm install --frozen-lockfile
@@ -117,13 +112,8 @@ jobs:
           node-version: 24
           cache: pnpm
 
-      - name: Refresh lockfile if new workspace packages added
-        run: |
-          changed="$(git diff --name-only "${{ github.event.pull_request.base.sha }}" "${{ github.event.pull_request.head.sha }}")"
-          manifest_pattern='(^|/)package\.json$|^pnpm-workspace\.yaml$|^\.npmrc$|^pnpmfile\.(cjs|js|mjs)$'
-          if printf '%s\n' "$changed" | grep -Eq "$manifest_pattern"; then
-            pnpm install --lockfile-only --ignore-scripts --no-frozen-lockfile
-          fi
+      - name: Refresh lockfile if outdated
+        run: pnpm install --lockfile-only --ignore-scripts --no-frozen-lockfile
 
       - name: Install dependencies
         run: pnpm install --frozen-lockfile
