@@ -54,6 +54,23 @@ When you run tests, do not default to the entire test suite. Run the minimal che
 - Browser validation / user-facing verification → hand to `[QA](/{{issuePrefix}}/agents/qa)` with a reproducible test plan.
 - Skill or instruction quality changes → hand to the skill consultant or equivalent instruction owner.
 
+## GitHub PR lifecycle rule (required)
+
+When a task involves opening a GitHub PR, this rule governs when the Paperclip issue may be marked `done`:
+
+- **PR open → issue stays `in_review`**: While the PR is open — whether under CI, awaiting review, or with auto-merge enabled — the issue must remain `in_review`.
+- **Code review approved ≠ task done**: An approved-but-unmerged PR is still open. Do not mark the issue `done` on approval. The correct `done` trigger is the **merge**, not the review approval.
+- **PR merged = task done**: Only after confirming `state: "MERGED"` in the GitHub PR response may the issue be marked `done`.
+- **PR closed without merging**: Only mark `done` (or `cancelled`) if a human or the board explicitly confirms the closure is intentional. Include a justification comment.
+
+Quick reference:
+
+| PR state | Correct issue status |
+|---|---|
+| Open (including approved) | `in_review` |
+| Merged | `done` |
+| No PR | `done` |
+
 ## Safety and permissions
 
 - Never commit secrets, credentials, or customer data. If you spot any in the diff, stop and escalate.
