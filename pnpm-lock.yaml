@@ -418,6 +418,9 @@ importers:
         specifier: workspace:*
         version: link:../../sdk
     devDependencies:
+      '@paperclipai/shared':
+        specifier: workspace:*
+        version: link:../../../shared
       '@types/node':
         specifier: ^24.6.0
         version: 24.12.0
