@@ -847,6 +847,7 @@ export function issueThreadInteractionService(db: Db) {
             createdByUserId: actor.userId ?? null,
             actorAgentId: actor.agentId ?? null,
             actorUserId: actor.userId ?? null,
+            sourceCommentIdForDuplicateGuard: current.sourceCommentId ?? null,
           } as Parameters<ReturnType<typeof issueService>["createChild"]>[1]);
 
           const parentIdentifier = createdByClientKey.get(task.parentClientKey ?? "")?.identifier

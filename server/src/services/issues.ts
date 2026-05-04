@@ -51,6 +51,7 @@ import {
   issueTreeControlService,
   type ActiveIssueTreePauseHoldGate,
 } from "./issue-tree-control.js";
+import { assertNoDuplicateExternalGitHubIssueReferences } from "./external-github-issue-duplicates.js";
 
 const ALL_ISSUE_STATUSES = ["backlog", "todo", "in_progress", "in_review", "blocked", "done", "cancelled"];
 const MAX_ISSUE_COMMENT_PAGE_LIMIT = 500;
@@ -155,6 +156,8 @@ type IssueCreateInput = Omit<typeof issues.$inferInsert, "companyId"> & {
   labelIds?: string[];
   blockedByIssueIds?: string[];
   inheritExecutionWorkspaceFromIssueId?: string | null;
+  allowDuplicateExternalIssueReference?: boolean;
+  sourceCommentIdForDuplicateGuard?: string | null;
 };
 type IssueChildCreateInput = IssueCreateInput & {
   acceptanceCriteria?: string[];
@@ -2602,6 +2605,7 @@ export function issueService(db: Db) {
         blockParentUntilDone,
         actorAgentId,
         actorUserId,
+        sourceCommentIdForDuplicateGuard,
         ...issueData
       } = data;
       const child = await issueService(db).create(parent.companyId, {
@@ -2614,6 +2618,7 @@ export function issueService(db: Db) {
         ),
         description: appendAcceptanceCriteriaToDescription(issueData.description, acceptanceCriteria),
         inheritExecutionWorkspaceFromIssueId: parent.id,
+        sourceCommentIdForDuplicateGuard,
       });
 
       if (blockParentUntilDone) {
@@ -2643,6 +2648,8 @@ export function issueService(db: Db) {
         labelIds: inputLabelIds,
         blockedByIssueIds,
         inheritExecutionWorkspaceFromIssueId,
+        allowDuplicateExternalIssueReference,
+        sourceCommentIdForDuplicateGuard,
         ...issueData
       } = data;
       const isolatedWorkspacesEnabled = (await instanceSettings.getExperimental()).enableIsolatedWorkspaces;
@@ -2663,6 +2670,15 @@ export function issueService(db: Db) {
       if (data.status === "in_progress" && !data.assigneeAgentId && !data.assigneeUserId) {
         throw unprocessable("in_progress issues require an assignee");
       }
+      await assertNoDuplicateExternalGitHubIssueReferences({
+        db,
+        companyId,
+        title: issueData.title,
+        description: issueData.description,
+        sourceIssueId: inheritExecutionWorkspaceFromIssueId ?? issueData.parentId ?? null,
+        sourceCommentId: sourceCommentIdForDuplicateGuard ?? null,
+        allowDuplicateExternalIssueReference,
+      });
       return db.transaction(async (tx) => {
         const defaultCompanyGoal = await getDefaultCompanyGoal(tx, companyId);
         const projectGoalId = await getProjectDefaultGoalId(tx, companyId, issueData.projectId);

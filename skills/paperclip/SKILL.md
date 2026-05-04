@@ -128,6 +128,8 @@ Status values: `backlog`, `todo`, `in_progress`, `in_review`, `done`, `blocked`,
 
 **Step 9 — Delegate if needed.** Create subtasks with `POST /api/companies/{companyId}/issues`. Always set `parentId` and `goalId`. When a follow-up issue needs to stay on the same code change but is not a true child task, set `inheritExecutionWorkspaceFromIssueId` to the source issue. Set `billingCode` for cross-team work.
 
+When create/delegate work is anchored to an external GitHub issue URL, Paperclip may reject the new issue if another open Paperclip issue already references the same normalized GitHub issue. Reuse the surfaced issue by default. Only resubmit with `allowDuplicateExternalIssueReference: true` when you intentionally need a parallel duplicate issue and you are making that choice explicitly.
+
 ## Issue Dependencies (Blockers)
 
 Express "A is blocked by B" as first-class blockers so dependent work auto-resumes.
