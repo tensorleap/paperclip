@@ -711,6 +711,12 @@ export async function startServer(): Promise<StartedServer> {
           logger.warn({ ...reviewed }, "startup productivity reconciliation created or updated review work");
         }
       })
+      .then(async () => {
+        const stalled = await heartbeat.reconcileStallDetection();
+        if (stalled.tier1Posted > 0 || stalled.tier2Posted > 0 || stalled.failed > 0) {
+          logger.warn({ ...stalled }, "startup stall detection posted comments or encountered failures");
+        }
+      })
       .catch((err) => {
         logger.error({ err }, "startup heartbeat recovery failed");
       });
@@ -774,6 +780,12 @@ export async function startServer(): Promise<StartedServer> {
           const reviewed = await heartbeat.reconcileProductivityReviews();
           if (reviewed.created > 0 || reviewed.updated > 0 || reviewed.failed > 0) {
             logger.warn({ ...reviewed }, "periodic productivity reconciliation created or updated review work");
+          }
+        })
+        .then(async () => {
+          const stalled = await heartbeat.reconcileStallDetection();
+          if (stalled.tier1Posted > 0 || stalled.tier2Posted > 0 || stalled.failed > 0) {
+            logger.warn({ ...stalled }, "periodic stall detection posted comments or encountered failures");
           }
         })
         .catch((err) => {
