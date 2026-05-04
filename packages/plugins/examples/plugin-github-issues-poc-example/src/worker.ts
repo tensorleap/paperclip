@@ -77,6 +77,17 @@ type PullRequestMapping = {
   updatedAt: string;
 };
 
+type PullRequestLink = {
+  githubPullRequestKey: string;
+  githubIssueKey: string | null;
+  paperclipIssueId: string;
+  paperclipIssueIdentifier: string | null;
+  pullRequestUrl: string | null;
+  workProduct: unknown | null;
+};
+
+type PullRequestCheckActionability = "waiting" | "failed" | "passed";
+
 type SyncResult = {
   processed: boolean;
   reason: string;
@@ -112,6 +123,15 @@ type GitHubPullRequest = {
   draft?: unknown;
   merged?: unknown;
   state?: unknown;
+  review_decision?: unknown;
+  head?: {
+    ref?: unknown;
+    sha?: unknown;
+  } | null;
+  base?: {
+    ref?: unknown;
+    sha?: unknown;
+  } | null;
 };
 
 type GitHubRepository = {
@@ -126,6 +146,40 @@ type GitHubComment = {
   body?: unknown;
   html_url?: unknown;
   user?: GitHubActor | null;
+};
+
+type GitHubPullRequestReview = {
+  body?: unknown;
+  html_url?: unknown;
+  state?: unknown;
+  user?: GitHubActor | null;
+};
+
+type GitHubCheckRun = {
+  name?: unknown;
+  status?: unknown;
+  conclusion?: unknown;
+  html_url?: unknown;
+  details_url?: unknown;
+  head_sha?: unknown;
+  output?: {
+    title?: unknown;
+    summary?: unknown;
+    text?: unknown;
+  } | null;
+  pull_requests?: unknown;
+};
+
+type GitHubCheckSuite = {
+  status?: unknown;
+  conclusion?: unknown;
+  head_branch?: unknown;
+  head_sha?: unknown;
+  html_url?: unknown;
+  pull_requests?: unknown;
+  app?: {
+    name?: unknown;
+  } | null;
 };
 
 type GitHubIssuesPayload = {
@@ -162,14 +216,53 @@ type GitHubPullRequestReviewCommentPayload = {
   comment?: GitHubComment | null;
 };
 
+type GitHubPullRequestReviewPayload = {
+  action?: unknown;
+  number?: unknown;
+  pull_request?: GitHubPullRequest | null;
+  repository?: GitHubRepository | null;
+  sender?: GitHubActor | null;
+  review?: GitHubPullRequestReview | null;
+};
+
+type GitHubCheckRunPayload = {
+  action?: unknown;
+  repository?: GitHubRepository | null;
+  sender?: GitHubActor | null;
+  check_run?: GitHubCheckRun | null;
+};
+
+type GitHubCheckSuitePayload = {
+  action?: unknown;
+  repository?: GitHubRepository | null;
+  sender?: GitHubActor | null;
+  check_suite?: GitHubCheckSuite | null;
+};
+
 let currentContext: PluginContext | null = null;
 
 function normalizeString(value: unknown): string | null {
   return typeof value === "string" && value.trim().length > 0 ? value.trim() : null;
 }
 
+function normalizeLowercaseString(value: unknown): string | null {
+  return normalizeString(value)?.toLowerCase() ?? null;
+}
+
+function normalizeRecord(value: unknown): Record<string, unknown> | null {
+  return value && typeof value === "object" && !Array.isArray(value)
+    ? value as Record<string, unknown>
+    : null;
+}
+
 function normalizeBoolean(value: unknown): boolean {
   return value === true;
+}
+
+function normalizeOptionalBoolean(value: unknown): boolean | null {
+  if (value === true) return true;
+  if (value === false) return false;
+  return null;
 }
 
 function normalizeAssigneeRoute(value: unknown): AssigneeRoute | null {
@@ -243,7 +336,9 @@ function getIssueNumber(candidate: { number?: unknown }): number {
   throw new Error("GitHub payload is missing a valid issue or pull request number");
 }
 
-function getPullRequestNumber(payload: GitHubPullRequestPayload | GitHubPullRequestReviewCommentPayload): number {
+function getPullRequestNumber(
+  payload: GitHubPullRequestPayload | GitHubPullRequestReviewCommentPayload | GitHubPullRequestReviewPayload,
+): number {
   if (typeof payload.number === "number" && Number.isFinite(payload.number)) {
     return payload.number;
   }
@@ -255,6 +350,150 @@ function getPullRequestNumber(payload: GitHubPullRequestPayload | GitHubPullRequ
 
 function githubKey(repositoryFullName: string, number: number): string {
   return `${repositoryFullName}#${number}`;
+}
+
+function splitRepositoryFullName(repositoryFullName: string): { owner: string | null; name: string | null } {
+  const [ownerPart, ...nameParts] = repositoryFullName.split("/");
+  const owner = normalizeString(ownerPart);
+  const name = normalizeString(nameParts.join("/"));
+  return { owner, name };
+}
+
+function pullRequestWorkProductStatus(input: {
+  state: string | null;
+  isDraft: boolean | null;
+  isMerged: boolean | null;
+}): "active" | "ready_for_review" | "merged" | "closed" | "draft" {
+  if (input.isMerged === true) return "merged";
+  if (input.state === "closed") return "closed";
+  if (input.isDraft === true) return "draft";
+  if (input.state === "open" && input.isDraft === false) return "ready_for_review";
+  return "active";
+}
+
+function pullRequestWorkProductReviewState(value: string | null): "none" | "approved" | "changes_requested" {
+  const normalized = normalizeLowercaseString(value);
+  if (normalized === "approved") return "approved";
+  if (normalized === "changes_requested") return "changes_requested";
+  return "none";
+}
+
+function pullRequestCheckActionabilityFromSignal(input: {
+  status: string | null;
+  conclusion: string | null;
+}): PullRequestCheckActionability | null {
+  if (input.status !== "completed") return "waiting";
+  if (!input.conclusion) return "waiting";
+  if (["success", "neutral", "skipped"].includes(input.conclusion)) return "passed";
+  if (["failure", "timed_out", "cancelled", "action_required", "startup_failure", "stale"].includes(input.conclusion)) {
+    return "failed";
+  }
+  return "waiting";
+}
+
+function readPullRequestCheckActionability(value: unknown): PullRequestCheckActionability | null {
+  const normalized = normalizeLowercaseString(value);
+  if (normalized === "waiting" || normalized === "failed" || normalized === "passed") {
+    return normalized;
+  }
+  return null;
+}
+
+function aggregatePullRequestCheckActionability(collections: Array<Record<string, unknown>>): PullRequestCheckActionability | null {
+  const actionabilities = collections.flatMap((collection) => Object.values(collection).map((entry) => {
+    const record = normalizeRecord(entry);
+    return readPullRequestCheckActionability(record?.actionability);
+  })).filter((value): value is PullRequestCheckActionability => value !== null);
+
+  if (actionabilities.includes("failed")) return "failed";
+  if (actionabilities.includes("waiting")) return "waiting";
+  if (actionabilities.includes("passed")) return "passed";
+  return null;
+}
+
+function pullRequestHealthStatusFromChecks(actionability: PullRequestCheckActionability | null): "unknown" | "healthy" | "unhealthy" {
+  if (actionability === "failed") return "unhealthy";
+  if (actionability === "waiting") return "unknown";
+  if (actionability === "passed") return "healthy";
+  return "unknown";
+}
+
+function buildPullRequestWorkProductSummary(input: {
+  externalId: string;
+  status: "active" | "ready_for_review" | "merged" | "closed" | "draft";
+  reviewState: "none" | "approved" | "changes_requested";
+  checksActionability: PullRequestCheckActionability | null;
+}): string {
+  const segments = [`GitHub pull request ${input.externalId}`, `status: ${input.status}`];
+  if (input.reviewState !== "none") {
+    segments.push(`review: ${input.reviewState.replace(/_/g, " ")}`);
+  }
+  if (input.checksActionability) {
+    segments.push(`checks: ${input.checksActionability}`);
+  }
+  return segments.join(" | ");
+}
+
+function buildNextPullRequestChecksMetadata(
+  existingMetadata: Record<string, unknown> | null,
+  input: {
+    collection: "checkRuns" | "checkSuites";
+    key: string;
+    status: string | null;
+    conclusion: string | null;
+    name: string | null;
+    url: string | null;
+    deliveryId: string;
+    eventName: string;
+  },
+): {
+  metadataPatch: Record<string, unknown>;
+  previousActionability: PullRequestCheckActionability | null;
+  nextActionability: PullRequestCheckActionability | null;
+} {
+  const now = new Date().toISOString();
+  const existingCheckRuns = normalizeRecord(existingMetadata?.checkRuns) ?? {};
+  const existingCheckSuites = normalizeRecord(existingMetadata?.checkSuites) ?? {};
+  const previousActionability = aggregatePullRequestCheckActionability([existingCheckRuns, existingCheckSuites]);
+  const nextEntry = {
+    actionability: pullRequestCheckActionabilityFromSignal({
+      status: input.status,
+      conclusion: input.conclusion,
+    }),
+    status: input.status,
+    conclusion: input.conclusion,
+    name: input.name,
+    url: input.url,
+    lastDeliveryId: input.deliveryId,
+    lastEventName: input.eventName,
+    updatedAt: now,
+  };
+  const nextCheckRuns = input.collection === "checkRuns"
+    ? { ...existingCheckRuns, [input.key]: nextEntry }
+    : existingCheckRuns;
+  const nextCheckSuites = input.collection === "checkSuites"
+    ? { ...existingCheckSuites, [input.key]: nextEntry }
+    : existingCheckSuites;
+  const nextActionability = aggregatePullRequestCheckActionability([nextCheckRuns, nextCheckSuites]);
+
+  return {
+    metadataPatch: {
+      checkRuns: nextCheckRuns,
+      checkSuites: nextCheckSuites,
+      checks: {
+        actionability: nextActionability,
+        status: input.status,
+        conclusion: input.conclusion,
+        name: input.name,
+        url: input.url,
+        lastDeliveryId: input.deliveryId,
+        lastEventName: input.eventName,
+        updatedAt: now,
+      },
+    },
+    previousActionability,
+    nextActionability,
+  };
 }
 
 function issueMappingStateKey(githubIssueKey: string): string {
@@ -451,11 +690,12 @@ function buildCommentMirrorBody(input: {
 function buildPullRequestEventComment(input: {
   action: string;
   githubPullRequestKey: string;
-  githubIssueKey: string;
+  githubIssueKey: string | null;
   actorLogin: string;
   githubUrl: string | null;
   isMerged: boolean;
   wakeQueued: boolean;
+  paperclipStatusChanged?: string | null;
 }): string {
   let actionLine = `GitHub pull request event \`${input.action}\` was received.`;
   if (input.action === "closed") {
@@ -470,11 +710,12 @@ function buildPullRequestEventComment(input: {
 
   return joinCommentLines([
     `GitHub pull_request.${input.action}: ${input.githubPullRequestKey}`,
-    `Linked issue: ${input.githubIssueKey}`,
+    input.githubIssueKey ? `Linked issue: ${input.githubIssueKey}` : null,
     `Actor: ${input.actorLogin}`,
     input.githubUrl ? `URL: ${input.githubUrl}` : null,
     "",
     actionLine,
+    input.paperclipStatusChanged ? `Paperclip status set to \`${input.paperclipStatusChanged}\`.` : null,
     input.wakeQueued ? "Paperclip wake requested." : null,
   ]);
 }
@@ -482,7 +723,7 @@ function buildPullRequestEventComment(input: {
 function buildPullRequestCommentBody(input: {
   eventName: string;
   githubPullRequestKey: string;
-  githubIssueKey: string;
+  githubIssueKey: string | null;
   actorLogin: string;
   githubUrl: string | null;
   commentBody: string | null;
@@ -490,11 +731,61 @@ function buildPullRequestCommentBody(input: {
 }): string {
   return joinCommentLines([
     `${input.eventName}: ${input.githubPullRequestKey}`,
-    `Linked issue: ${input.githubIssueKey}`,
+    input.githubIssueKey ? `Linked issue: ${input.githubIssueKey}` : null,
     `Actor: ${input.actorLogin}`,
     input.githubUrl ? `URL: ${input.githubUrl}` : null,
     "",
     input.commentBody ? blockQuote(input.commentBody) : "_Comment body unavailable._",
+    input.wakeQueued ? "" : null,
+    input.wakeQueued ? "Paperclip wake requested." : null,
+  ]);
+}
+
+function buildPullRequestReviewBody(input: {
+  action: string;
+  githubPullRequestKey: string;
+  githubIssueKey: string | null;
+  actorLogin: string;
+  githubUrl: string | null;
+  reviewState: "none" | "approved" | "changes_requested";
+  reviewBody: string | null;
+  wakeQueued: boolean;
+}): string {
+  return joinCommentLines([
+    `GitHub pull_request_review.${input.action}: ${input.githubPullRequestKey}`,
+    input.githubIssueKey ? `Linked issue: ${input.githubIssueKey}` : null,
+    `Actor: ${input.actorLogin}`,
+    input.githubUrl ? `URL: ${input.githubUrl}` : null,
+    "",
+    `Review state: ${input.reviewState.replace(/_/g, " ")}`,
+    input.reviewBody ? blockQuote(input.reviewBody) : "_Review body unavailable._",
+    input.wakeQueued ? "" : null,
+    input.wakeQueued ? "Paperclip wake requested." : null,
+  ]);
+}
+
+function buildPullRequestCheckBody(input: {
+  eventName: string;
+  githubPullRequestKey: string;
+  githubIssueKey: string | null;
+  actorLogin: string;
+  githubUrl: string | null;
+  checkName: string | null;
+  status: string | null;
+  conclusion: string | null;
+  actionability: PullRequestCheckActionability | null;
+  wakeQueued: boolean;
+}): string {
+  return joinCommentLines([
+    `${input.eventName}: ${input.githubPullRequestKey}`,
+    input.githubIssueKey ? `Linked issue: ${input.githubIssueKey}` : null,
+    `Actor: ${input.actorLogin}`,
+    input.githubUrl ? `URL: ${input.githubUrl}` : null,
+    "",
+    input.checkName ? `Check: ${input.checkName}` : null,
+    input.status ? `Status: ${input.status}` : null,
+    input.conclusion ? `Conclusion: ${input.conclusion}` : null,
+    input.actionability ? `Actionability: ${input.actionability}` : null,
     input.wakeQueued ? "" : null,
     input.wakeQueued ? "Paperclip wake requested." : null,
   ]);
@@ -708,8 +999,249 @@ async function readPullRequestMapping(
   return readState<PullRequestMapping>(ctx, companyId, pullRequestMappingStateKey(githubPullRequestKey));
 }
 
-async function writePullRequestMapping(ctx: PluginContext, companyId: string, mapping: PullRequestMapping): Promise<void> {
-  await writeState(ctx, companyId, pullRequestMappingStateKey(mapping.githubPullRequestKey), mapping);
+async function buildPullRequestLinkFromWorkProduct(
+  ctx: PluginContext,
+  companyId: string,
+  githubPullRequestKey: string,
+  workProduct: unknown,
+  fallbackPullRequestUrl: string | null,
+): Promise<PullRequestLink | null> {
+  const workProductRecord = normalizeRecord(workProduct);
+  const issueId = normalizeString(workProductRecord?.issueId);
+  if (!issueId) return null;
+  const issue = await ctx.issues.get(issueId, companyId);
+  if (!issue) return null;
+  return {
+    githubPullRequestKey,
+    githubIssueKey: normalizeString(issue.originId),
+    paperclipIssueId: issue.id,
+    paperclipIssueIdentifier: issue.identifier,
+    pullRequestUrl: normalizeString(workProductRecord?.url) ?? fallbackPullRequestUrl,
+    workProduct: workProductRecord,
+  };
+}
+
+async function findPullRequestLinksByWorkProduct(
+  ctx: PluginContext,
+  companyId: string,
+  githubPullRequestKey: string,
+  fallbackPullRequestUrl: string | null,
+): Promise<PullRequestLink[]> {
+  const linkedWorkProducts = await ctx.issues.workProducts.find({
+    companyId,
+    type: "pull_request",
+    provider: "github",
+    externalId: githubPullRequestKey,
+  });
+  const links: PullRequestLink[] = [];
+  const seenIssueIds = new Set<string>();
+  for (const workProduct of linkedWorkProducts) {
+    const link = await buildPullRequestLinkFromWorkProduct(
+      ctx,
+      companyId,
+      githubPullRequestKey,
+      workProduct,
+      fallbackPullRequestUrl,
+    );
+    if (!link || seenIssueIds.has(link.paperclipIssueId)) continue;
+    seenIssueIds.add(link.paperclipIssueId);
+    links.push(link);
+  }
+  return links;
+}
+
+async function upsertPullRequestWorkProduct(
+  ctx: PluginContext,
+  companyId: string,
+  issueId: string,
+  input: {
+    repositoryFullName: string;
+    pullRequestNumber: number;
+    pullRequestUrl: string | null;
+    pullRequestTitle: string | null;
+    state: string | null;
+    isDraft: boolean | null;
+    isMerged: boolean | null;
+    reviewState: string | null;
+    headRef: string | null;
+    headSha: string | null;
+    baseRef: string | null;
+    baseSha: string | null;
+    existingWorkProduct?: unknown;
+    metadataPatch?: Record<string, unknown>;
+    healthStatus?: "unknown" | "healthy" | "unhealthy" | null;
+  },
+): Promise<void> {
+  const externalId = githubKey(input.repositoryFullName, input.pullRequestNumber);
+  const { owner, name } = splitRepositoryFullName(input.repositoryFullName);
+  const workProductRecord = normalizeRecord(input.existingWorkProduct);
+  const existingMetadata = normalizeRecord(workProductRecord?.metadata);
+  const nextPullRequestUrl = input.pullRequestUrl
+    ?? normalizeString(workProductRecord?.url)
+    ?? normalizeString(existingMetadata?.url);
+  const nextState = input.state ?? normalizeString(existingMetadata?.state);
+  const nextIsDraft = input.isDraft ?? normalizeOptionalBoolean(existingMetadata?.draft);
+  const nextIsMerged = input.isMerged ?? normalizeOptionalBoolean(existingMetadata?.merged);
+  const nextReviewStateSource = input.reviewState ?? normalizeString(existingMetadata?.reviewState);
+  const nextHeadRef = input.headRef ?? normalizeString(existingMetadata?.headRef);
+  const nextHeadSha = input.headSha ?? normalizeString(existingMetadata?.headSha);
+  const nextBaseRef = input.baseRef ?? normalizeString(existingMetadata?.baseRef);
+  const nextBaseSha = input.baseSha ?? normalizeString(existingMetadata?.baseSha);
+  const checksActionability = readPullRequestCheckActionability(normalizeRecord(existingMetadata?.checks)?.actionability);
+  const status = pullRequestWorkProductStatus({
+    state: nextState,
+    isDraft: nextIsDraft,
+    isMerged: nextIsMerged,
+  });
+  const reviewState = pullRequestWorkProductReviewState(nextReviewStateSource);
+  const nextMetadata: Record<string, unknown> = {
+    ...(existingMetadata ?? {}),
+    host: "github.com",
+    repositoryFullName: input.repositoryFullName,
+    repositoryOwner: owner,
+    repositoryName: name,
+    pullRequestNumber: input.pullRequestNumber,
+    url: nextPullRequestUrl,
+    state: nextState,
+    draft: nextIsDraft,
+    merged: nextIsMerged,
+    reviewState: nextReviewStateSource,
+    headRef: nextHeadRef,
+    headSha: nextHeadSha,
+    baseRef: nextBaseRef,
+    baseSha: nextBaseSha,
+    ...(input.metadataPatch ?? {}),
+  };
+  const nextChecksActionability = readPullRequestCheckActionability(normalizeRecord(nextMetadata.checks)?.actionability) ?? checksActionability;
+  await ctx.issues.workProducts.upsert({
+    issueId,
+    companyId,
+    type: "pull_request",
+    provider: "github",
+    externalId,
+    title: input.pullRequestTitle
+      ?? normalizeString(workProductRecord?.title)
+      ?? `GitHub pull request #${input.pullRequestNumber}`,
+    url: nextPullRequestUrl,
+    status,
+    reviewState,
+    isPrimary: true,
+    healthStatus: input.healthStatus
+      ?? (normalizeLowercaseString(workProductRecord?.healthStatus) as "unknown" | "healthy" | "unhealthy" | null)
+      ?? "healthy",
+    summary: buildPullRequestWorkProductSummary({
+      externalId,
+      status,
+      reviewState,
+      checksActionability: nextChecksActionability,
+    }),
+    metadata: nextMetadata,
+  });
+}
+
+async function resolvePullRequestLinks(
+  ctx: PluginContext,
+  config: PluginConfig,
+  repositoryFullName: string,
+  pullRequestNumber: number,
+  pullRequestUrl: string | null,
+  texts: Array<string | null | undefined>,
+): Promise<PullRequestLink[]> {
+  const githubPullRequestKey = githubKey(repositoryFullName, pullRequestNumber);
+  const linkedByWorkProduct = await findPullRequestLinksByWorkProduct(
+    ctx,
+    config.companyId,
+    githubPullRequestKey,
+    pullRequestUrl,
+  );
+  if (linkedByWorkProduct.length > 0) {
+    return linkedByWorkProduct;
+  }
+
+  const legacyMapping = await readPullRequestMapping(ctx, config.companyId, githubPullRequestKey);
+  if (legacyMapping) {
+    return [{
+      githubPullRequestKey,
+      githubIssueKey: legacyMapping.githubIssueKey,
+      paperclipIssueId: legacyMapping.paperclipIssueId,
+      paperclipIssueIdentifier: null,
+      pullRequestUrl: pullRequestUrl ?? legacyMapping.pullRequestUrl,
+      workProduct: null,
+    }];
+  }
+
+  const links: PullRequestLink[] = [];
+  const seenIssueIds = new Set<string>();
+  for (const referencedIssueKey of extractIssueReferenceKeys(repositoryFullName, texts)) {
+    const issueMapping = await getOrRecoverIssueMapping(ctx, config, config.companyId, referencedIssueKey);
+    if (!issueMapping || seenIssueIds.has(issueMapping.paperclipIssueId)) continue;
+    seenIssueIds.add(issueMapping.paperclipIssueId);
+    links.push({
+      githubPullRequestKey,
+      githubIssueKey: referencedIssueKey,
+      paperclipIssueId: issueMapping.paperclipIssueId,
+      paperclipIssueIdentifier: issueMapping.paperclipIssueIdentifier,
+      pullRequestUrl,
+      workProduct: null,
+    });
+  }
+
+  if (links.length === 0 && pullRequestUrl) {
+    const commentRecovered = await recoverPullRequestMappingFromIssueComments(
+      ctx, config.companyId, githubPullRequestKey, pullRequestUrl,
+    );
+    if (commentRecovered) {
+      links.push(commentRecovered);
+      await upsertPullRequestWorkProduct(ctx, config.companyId, commentRecovered.paperclipIssueId, {
+        repositoryFullName,
+        pullRequestNumber,
+        pullRequestUrl,
+        pullRequestTitle: null,
+        state: null,
+        isDraft: null,
+        isMerged: null,
+        reviewState: null,
+        headRef: null,
+        headSha: null,
+        baseRef: null,
+        baseSha: null,
+      });
+    }
+  }
+
+  return links;
+}
+
+async function recoverPullRequestMappingFromIssueComments(
+  ctx: PluginContext,
+  companyId: string,
+  githubPullRequestKey: string,
+  pullRequestUrl: string,
+): Promise<PullRequestLink | null> {
+  const activeStatuses = ["in_progress", "in_review", "todo", "blocked"] as const;
+  for (const status of activeStatuses) {
+    let offset = 0;
+    const pageSize = 25;
+    while (true) {
+      const issues = await ctx.issues.list({ companyId, status, limit: pageSize, offset });
+      for (const issue of issues) {
+        const comments = await ctx.issues.listComments(issue.id, companyId);
+        if (comments.some((c) => c.body.includes(pullRequestUrl))) {
+          return {
+            githubPullRequestKey,
+            githubIssueKey: normalizeString(issue.originId) ?? null,
+            paperclipIssueId: issue.id,
+            paperclipIssueIdentifier: issue.identifier,
+            pullRequestUrl,
+            workProduct: null,
+          };
+        }
+      }
+      if (issues.length < pageSize) break;
+      offset += pageSize;
+    }
+  }
+  return null;
 }
 
 async function recoverIssueMappingFromOrigin(
@@ -894,44 +1426,6 @@ async function ensureIssueMapping(
   return { mapping, created: true, wakeQueued };
 }
 
-async function resolvePullRequestMapping(
-  ctx: PluginContext,
-  config: PluginConfig,
-  repositoryFullName: string,
-  pullRequestNumber: number,
-  pullRequestUrl: string | null,
-  texts: Array<string | null | undefined>,
-): Promise<PullRequestMapping | null> {
-  const githubPullRequestKey = githubKey(repositoryFullName, pullRequestNumber);
-  const existing = await readPullRequestMapping(ctx, config.companyId, githubPullRequestKey);
-  if (existing) {
-    const updated: PullRequestMapping = {
-      ...existing,
-      pullRequestUrl: pullRequestUrl ?? existing.pullRequestUrl,
-      updatedAt: new Date().toISOString(),
-    };
-    await writePullRequestMapping(ctx, config.companyId, updated);
-    return updated;
-  }
-
-  for (const referencedIssueKey of extractIssueReferenceKeys(repositoryFullName, texts)) {
-    const issueMapping = await getOrRecoverIssueMapping(ctx, config, config.companyId, referencedIssueKey);
-    if (!issueMapping) continue;
-    const mapping: PullRequestMapping = {
-      githubPullRequestKey,
-      githubIssueKey: referencedIssueKey,
-      paperclipIssueId: issueMapping.paperclipIssueId,
-      pullRequestNumber,
-      pullRequestUrl,
-      updatedAt: new Date().toISOString(),
-    };
-    await writePullRequestMapping(ctx, config.companyId, mapping);
-    return mapping;
-  }
-
-  return null;
-}
-
 async function syncIssuesWebhook(
   ctx: PluginContext,
   config: PluginConfig,
@@ -1039,6 +1533,45 @@ async function syncIssuesWebhook(
   };
 }
 
+async function refreshPullRequestLinkMirrorIfPossible(
+  ctx: PluginContext,
+  config: PluginConfig,
+  deliveryId: string,
+  link: PullRequestLink,
+): Promise<void> {
+  if (!link.githubIssueKey) return;
+  const issueMapping = await getOrRecoverIssueMapping(ctx, config, config.companyId, link.githubIssueKey);
+  if (!issueMapping) return;
+  await refreshIssueMirror(ctx, config, issueMapping, { deliveryId });
+}
+
+async function maybeCompleteIssueOnMergedPullRequest(
+  ctx: PluginContext,
+  companyId: string,
+  issueId: string,
+): Promise<"done" | null> {
+  const issue = await ctx.issues.get(issueId, companyId);
+  if (!issue) return null;
+  if (issue.status !== "in_review") return null;
+  if (issue.executionPolicy || issue.executionState) return null;
+  await ctx.issues.update(issueId, { status: "done" }, companyId);
+  return "done";
+}
+
+function getLinkedPullRequestNumbers(value: unknown): number[] {
+  if (!Array.isArray(value)) return [];
+  const numbers = new Set<number>();
+  for (const entry of value) {
+    const number = (entry && typeof entry === "object" && !Array.isArray(entry))
+      ? (entry as { number?: unknown }).number
+      : null;
+    if (typeof number === "number" && Number.isFinite(number)) {
+      numbers.add(number);
+    }
+  }
+  return [...numbers];
+}
+
 async function syncIssueCommentWebhook(
   ctx: PluginContext,
   config: PluginConfig,
@@ -1058,7 +1591,7 @@ async function syncIssueCommentWebhook(
     const pullRequestNumber = getIssueNumber(issue);
     const pullRequestUrl = normalizeString((issue.pull_request as { html_url?: unknown } | null | undefined)?.html_url)
       ?? normalizeString(issue.html_url);
-    const pullRequestMapping = await resolvePullRequestMapping(
+    const pullRequestLinks = await resolvePullRequestLinks(
       ctx,
       config,
       repositoryFullName,
@@ -1066,42 +1599,59 @@ async function syncIssueCommentWebhook(
       pullRequestUrl,
       [normalizeString(issue.body), normalizeString(issue.title)],
     );
-    if (!pullRequestMapping) {
-      return { processed: false, reason: "pull-request-mapping-missing", mappedIssueId: null, wakeQueued: false };
+    if (pullRequestLinks.length === 0) {
+      return { processed: false, reason: "pull-request-link-missing", mappedIssueId: null, wakeQueued: false };
     }
 
-    const wakeQueued = await maybeWakeIssue(
-      ctx,
-      config.companyId,
-      pullRequestMapping.paperclipIssueId,
-      deliveryId,
-      `github:pull_request.issue_comment.${action}`,
-    );
+    let wakeQueued = false;
+    for (const pullRequestLink of pullRequestLinks) {
+      await upsertPullRequestWorkProduct(ctx, config.companyId, pullRequestLink.paperclipIssueId, {
+        repositoryFullName,
+        pullRequestNumber,
+        pullRequestUrl,
+        pullRequestTitle: normalizeString(issue.title),
+        state: normalizeString(issue.state),
+        isDraft: null,
+        isMerged: null,
+        reviewState: null,
+        headRef: null,
+        headSha: null,
+        baseRef: null,
+        baseSha: null,
+        existingWorkProduct: pullRequestLink.workProduct,
+      });
 
-    await appendIssueComment(
-      ctx,
-      config.companyId,
-      pullRequestMapping.paperclipIssueId,
-      buildPullRequestCommentBody({
-        eventName: `GitHub issue_comment.${action}`,
-        githubPullRequestKey: pullRequestMapping.githubPullRequestKey,
-        githubIssueKey: pullRequestMapping.githubIssueKey,
-        actorLogin: actorLogin(payload.comment?.user, payload.sender),
-        githubUrl: normalizeString(payload.comment?.html_url) ?? pullRequestMapping.pullRequestUrl,
-        commentBody: normalizeString(payload.comment?.body),
-        wakeQueued,
-      }),
-    );
+      const linkWakeQueued = await maybeWakeIssue(
+        ctx,
+        config.companyId,
+        pullRequestLink.paperclipIssueId,
+        deliveryId,
+        `github:pull_request.issue_comment.${action}`,
+      );
+      wakeQueued ||= linkWakeQueued;
 
-    const issueMapping = await getOrRecoverIssueMapping(ctx, config, config.companyId, pullRequestMapping.githubIssueKey);
-    if (issueMapping) {
-      await refreshIssueMirror(ctx, config, issueMapping, { deliveryId });
+      await appendIssueComment(
+        ctx,
+        config.companyId,
+        pullRequestLink.paperclipIssueId,
+        buildPullRequestCommentBody({
+          eventName: `GitHub issue_comment.${action}`,
+          githubPullRequestKey: pullRequestLink.githubPullRequestKey,
+          githubIssueKey: pullRequestLink.githubIssueKey,
+          actorLogin: actorLogin(payload.comment?.user, payload.sender),
+          githubUrl: normalizeString(payload.comment?.html_url) ?? pullRequestLink.pullRequestUrl,
+          commentBody: normalizeString(payload.comment?.body),
+          wakeQueued: linkWakeQueued,
+        }),
+      );
+
+      await refreshPullRequestLinkMirrorIfPossible(ctx, config, deliveryId, pullRequestLink);
     }
 
     return {
       processed: true,
       reason: `pull_request_issue_comment:${action}`,
-      mappedIssueId: pullRequestMapping.paperclipIssueId,
+      mappedIssueId: pullRequestLinks[0]?.paperclipIssueId ?? null,
       wakeQueued,
     };
   }
@@ -1169,7 +1719,7 @@ async function syncPullRequestWebhook(
   }
 
   const pullRequestNumber = getPullRequestNumber(payload);
-  const pullRequestMapping = await resolvePullRequestMapping(
+  const pullRequestLinks = await resolvePullRequestLinks(
     ctx,
     config,
     repositoryFullName,
@@ -1177,38 +1727,386 @@ async function syncPullRequestWebhook(
     normalizeString(pullRequest.html_url),
     [normalizeString(pullRequest.body), normalizeString(pullRequest.title)],
   );
-  if (!pullRequestMapping) {
-    return { processed: false, reason: "pull-request-mapping-missing", mappedIssueId: null, wakeQueued: false };
+  if (pullRequestLinks.length === 0) {
+    return { processed: false, reason: "pull-request-link-missing", mappedIssueId: null, wakeQueued: false };
   }
 
-  const wakeQueued = action === "closed"
-    ? false
-    : await maybeWakeIssue(ctx, config.companyId, pullRequestMapping.paperclipIssueId, deliveryId, `github:pull_request.${action}`);
+  let wakeQueued = false;
+  for (const pullRequestLink of pullRequestLinks) {
+    await upsertPullRequestWorkProduct(ctx, config.companyId, pullRequestLink.paperclipIssueId, {
+      repositoryFullName,
+      pullRequestNumber,
+      pullRequestUrl: normalizeString(pullRequest.html_url),
+      pullRequestTitle: normalizeString(pullRequest.title),
+      state: normalizeString(pullRequest.state),
+      isDraft: normalizeOptionalBoolean(pullRequest.draft),
+      isMerged: normalizeOptionalBoolean(pullRequest.merged),
+      reviewState: normalizeString(pullRequest.review_decision),
+      headRef: normalizeString(pullRequest.head?.ref),
+      headSha: normalizeString(pullRequest.head?.sha),
+      baseRef: normalizeString(pullRequest.base?.ref),
+      baseSha: normalizeString(pullRequest.base?.sha),
+      existingWorkProduct: pullRequestLink.workProduct,
+    });
 
-  await appendIssueComment(
-    ctx,
-    config.companyId,
-    pullRequestMapping.paperclipIssueId,
-    buildPullRequestEventComment({
-      action,
-      githubPullRequestKey: pullRequestMapping.githubPullRequestKey,
-      githubIssueKey: pullRequestMapping.githubIssueKey,
-      actorLogin: actorLogin(payload.sender),
-      githubUrl: normalizeString(pullRequest.html_url),
-      isMerged: normalizeBoolean(pullRequest.merged),
-      wakeQueued,
-    }),
-  );
+    const linkWakeQueued = await maybeWakeIssue(
+      ctx,
+      config.companyId,
+      pullRequestLink.paperclipIssueId,
+      deliveryId,
+      `github:pull_request.${action}`,
+    );
+    wakeQueued ||= linkWakeQueued;
 
-  const issueMapping = await getOrRecoverIssueMapping(ctx, config, config.companyId, pullRequestMapping.githubIssueKey);
-  if (issueMapping) {
-    await refreshIssueMirror(ctx, config, issueMapping, { deliveryId });
+    const paperclipStatusChanged = action === "closed" && normalizeBoolean(pullRequest.merged)
+      ? await maybeCompleteIssueOnMergedPullRequest(ctx, config.companyId, pullRequestLink.paperclipIssueId)
+      : null;
+
+    await appendIssueComment(
+      ctx,
+      config.companyId,
+      pullRequestLink.paperclipIssueId,
+      buildPullRequestEventComment({
+        action,
+        githubPullRequestKey: pullRequestLink.githubPullRequestKey,
+        githubIssueKey: pullRequestLink.githubIssueKey,
+        actorLogin: actorLogin(payload.sender),
+        githubUrl: normalizeString(pullRequest.html_url),
+        isMerged: normalizeBoolean(pullRequest.merged),
+        wakeQueued: linkWakeQueued,
+        paperclipStatusChanged,
+      }),
+    );
+
+    await refreshPullRequestLinkMirrorIfPossible(ctx, config, deliveryId, pullRequestLink);
   }
 
   return {
     processed: true,
     reason: `pull_request:${action}`,
-    mappedIssueId: pullRequestMapping.paperclipIssueId,
+    mappedIssueId: pullRequestLinks[0]?.paperclipIssueId ?? null,
+    wakeQueued,
+  };
+}
+
+async function syncPullRequestReviewWebhook(
+  ctx: PluginContext,
+  config: PluginConfig,
+  deliveryId: string,
+  payload: GitHubPullRequestReviewPayload,
+): Promise<SyncResult> {
+  const action = normalizeString(payload.action) ?? "unknown";
+  const pullRequest = payload.pull_request;
+  if (!pullRequest) return { processed: false, reason: "missing-pull-request", mappedIssueId: null, wakeQueued: false };
+
+  const repositoryFullName = getRepositoryFullName(payload.repository);
+  if (!repositoryMatches(repositoryFullName, config.repositoryFullName)) {
+    return { processed: false, reason: "ignored-repository", mappedIssueId: null, wakeQueued: false };
+  }
+
+  const pullRequestNumber = getPullRequestNumber(payload as GitHubPullRequestPayload & GitHubPullRequestReviewPayload);
+  const pullRequestLinks = await resolvePullRequestLinks(
+    ctx,
+    config,
+    repositoryFullName,
+    pullRequestNumber,
+    normalizeString(pullRequest.html_url),
+    [normalizeString(pullRequest.body), normalizeString(pullRequest.title), normalizeString(payload.review?.body)],
+  );
+  if (pullRequestLinks.length === 0) {
+    return { processed: false, reason: "pull-request-link-missing", mappedIssueId: null, wakeQueued: false };
+  }
+
+  const reviewStateSource = normalizeString(payload.review?.state) ?? normalizeString(pullRequest.review_decision);
+  const reviewState = pullRequestWorkProductReviewState(reviewStateSource);
+  let wakeQueued = false;
+  for (const pullRequestLink of pullRequestLinks) {
+    await upsertPullRequestWorkProduct(ctx, config.companyId, pullRequestLink.paperclipIssueId, {
+      repositoryFullName,
+      pullRequestNumber,
+      pullRequestUrl: normalizeString(pullRequest.html_url),
+      pullRequestTitle: normalizeString(pullRequest.title),
+      state: normalizeString(pullRequest.state),
+      isDraft: normalizeOptionalBoolean(pullRequest.draft),
+      isMerged: normalizeOptionalBoolean(pullRequest.merged),
+      reviewState: reviewStateSource,
+      headRef: normalizeString(pullRequest.head?.ref),
+      headSha: normalizeString(pullRequest.head?.sha),
+      baseRef: normalizeString(pullRequest.base?.ref),
+      baseSha: normalizeString(pullRequest.base?.sha),
+      existingWorkProduct: pullRequestLink.workProduct,
+    });
+
+    const linkWakeQueued = await maybeWakeIssue(
+      ctx,
+      config.companyId,
+      pullRequestLink.paperclipIssueId,
+      deliveryId,
+      `github:pull_request_review.${action}`,
+    );
+    wakeQueued ||= linkWakeQueued;
+
+    await appendIssueComment(
+      ctx,
+      config.companyId,
+      pullRequestLink.paperclipIssueId,
+      buildPullRequestReviewBody({
+        action,
+        githubPullRequestKey: pullRequestLink.githubPullRequestKey,
+        githubIssueKey: pullRequestLink.githubIssueKey,
+        actorLogin: actorLogin(payload.review?.user, payload.sender),
+        githubUrl: normalizeString(payload.review?.html_url) ?? normalizeString(pullRequest.html_url),
+        reviewState,
+        reviewBody: normalizeString(payload.review?.body),
+        wakeQueued: linkWakeQueued,
+      }),
+    );
+
+    await refreshPullRequestLinkMirrorIfPossible(ctx, config, deliveryId, pullRequestLink);
+  }
+
+  return {
+    processed: true,
+    reason: `pull_request_review:${action}`,
+    mappedIssueId: pullRequestLinks[0]?.paperclipIssueId ?? null,
+    wakeQueued,
+  };
+}
+
+async function syncCheckRunWebhook(
+  ctx: PluginContext,
+  config: PluginConfig,
+  deliveryId: string,
+  payload: GitHubCheckRunPayload,
+): Promise<SyncResult> {
+  const action = normalizeString(payload.action) ?? "unknown";
+  const checkRun = payload.check_run;
+  if (!checkRun) return { processed: false, reason: "missing-check-run", mappedIssueId: null, wakeQueued: false };
+
+  const repositoryFullName = getRepositoryFullName(payload.repository);
+  if (!repositoryMatches(repositoryFullName, config.repositoryFullName)) {
+    return { processed: false, reason: "ignored-repository", mappedIssueId: null, wakeQueued: false };
+  }
+
+  const pullRequestNumbers = getLinkedPullRequestNumbers(checkRun.pull_requests);
+  if (pullRequestNumbers.length === 0) {
+    return { processed: false, reason: "check-run-unlinked", mappedIssueId: null, wakeQueued: false };
+  }
+
+  const checkName = normalizeString(checkRun.name) ?? normalizeString(checkRun.output?.title);
+  const checkUrl = normalizeString(checkRun.details_url) ?? normalizeString(checkRun.html_url);
+  const status = normalizeLowercaseString(checkRun.status);
+  const conclusion = normalizeLowercaseString(checkRun.conclusion);
+  const eventName = `check_run.${action}`;
+  let processed = false;
+  let mappedIssueId: string | null = null;
+  let wakeQueued = false;
+
+  for (const pullRequestNumber of pullRequestNumbers) {
+    const pullRequestLinks = await resolvePullRequestLinks(
+      ctx,
+      config,
+      repositoryFullName,
+      pullRequestNumber,
+      checkUrl,
+      [],
+    );
+    if (pullRequestLinks.length === 0) continue;
+    processed = true;
+    mappedIssueId ??= pullRequestLinks[0]?.paperclipIssueId ?? null;
+
+    for (const pullRequestLink of pullRequestLinks) {
+      const workProductRecord = normalizeRecord(pullRequestLink.workProduct);
+      const existingMetadata = normalizeRecord(workProductRecord?.metadata);
+      const checkMetadata = buildNextPullRequestChecksMetadata(existingMetadata, {
+        collection: "checkRuns",
+        key: checkName ?? `check-run:${pullRequestNumber}`,
+        status,
+        conclusion,
+        name: checkName,
+        url: checkUrl,
+        deliveryId,
+        eventName,
+      });
+
+      await upsertPullRequestWorkProduct(ctx, config.companyId, pullRequestLink.paperclipIssueId, {
+        repositoryFullName,
+        pullRequestNumber,
+        pullRequestUrl: checkUrl,
+        pullRequestTitle: null,
+        state: normalizeString(existingMetadata?.state),
+        isDraft: normalizeOptionalBoolean(existingMetadata?.draft),
+        isMerged: normalizeOptionalBoolean(existingMetadata?.merged),
+        reviewState: normalizeString(existingMetadata?.reviewState),
+        headRef: normalizeString(existingMetadata?.headRef),
+        headSha: normalizeString(checkRun.head_sha) ?? normalizeString(existingMetadata?.headSha),
+        baseRef: normalizeString(existingMetadata?.baseRef),
+        baseSha: normalizeString(existingMetadata?.baseSha),
+        existingWorkProduct: pullRequestLink.workProduct,
+        metadataPatch: checkMetadata.metadataPatch,
+        healthStatus: pullRequestHealthStatusFromChecks(checkMetadata.nextActionability),
+      });
+
+      if (checkMetadata.previousActionability === checkMetadata.nextActionability) {
+        continue;
+      }
+
+      const linkWakeQueued = checkMetadata.nextActionability === "failed" || checkMetadata.nextActionability === "passed"
+        ? await maybeWakeIssue(
+          ctx,
+          config.companyId,
+          pullRequestLink.paperclipIssueId,
+          deliveryId,
+          `github:check_run.${action}:${checkMetadata.nextActionability}`,
+        )
+        : false;
+      wakeQueued ||= linkWakeQueued;
+
+      await appendIssueComment(
+        ctx,
+        config.companyId,
+        pullRequestLink.paperclipIssueId,
+        buildPullRequestCheckBody({
+          eventName: `GitHub check_run.${action}`,
+          githubPullRequestKey: pullRequestLink.githubPullRequestKey,
+          githubIssueKey: pullRequestLink.githubIssueKey,
+          actorLogin: actorLogin(payload.sender),
+          githubUrl: checkUrl,
+          checkName,
+          status,
+          conclusion,
+          actionability: checkMetadata.nextActionability,
+          wakeQueued: linkWakeQueued,
+        }),
+      );
+
+      await refreshPullRequestLinkMirrorIfPossible(ctx, config, deliveryId, pullRequestLink);
+    }
+  }
+
+  return {
+    processed,
+    reason: processed ? `check_run:${action}` : "pull-request-link-missing",
+    mappedIssueId,
+    wakeQueued,
+  };
+}
+
+async function syncCheckSuiteWebhook(
+  ctx: PluginContext,
+  config: PluginConfig,
+  deliveryId: string,
+  payload: GitHubCheckSuitePayload,
+): Promise<SyncResult> {
+  const action = normalizeString(payload.action) ?? "unknown";
+  const checkSuite = payload.check_suite;
+  if (!checkSuite) return { processed: false, reason: "missing-check-suite", mappedIssueId: null, wakeQueued: false };
+
+  const repositoryFullName = getRepositoryFullName(payload.repository);
+  if (!repositoryMatches(repositoryFullName, config.repositoryFullName)) {
+    return { processed: false, reason: "ignored-repository", mappedIssueId: null, wakeQueued: false };
+  }
+
+  const pullRequestNumbers = getLinkedPullRequestNumbers(checkSuite.pull_requests);
+  if (pullRequestNumbers.length === 0) {
+    return { processed: false, reason: "check-suite-unlinked", mappedIssueId: null, wakeQueued: false };
+  }
+
+  const checkName = normalizeString(checkSuite.app?.name) ?? normalizeString(checkSuite.head_branch);
+  const checkUrl = normalizeString(checkSuite.html_url);
+  const status = normalizeLowercaseString(checkSuite.status);
+  const conclusion = normalizeLowercaseString(checkSuite.conclusion);
+  const eventName = `check_suite.${action}`;
+  let processed = false;
+  let mappedIssueId: string | null = null;
+  let wakeQueued = false;
+
+  for (const pullRequestNumber of pullRequestNumbers) {
+    const pullRequestLinks = await resolvePullRequestLinks(
+      ctx,
+      config,
+      repositoryFullName,
+      pullRequestNumber,
+      checkUrl,
+      [],
+    );
+    if (pullRequestLinks.length === 0) continue;
+    processed = true;
+    mappedIssueId ??= pullRequestLinks[0]?.paperclipIssueId ?? null;
+
+    for (const pullRequestLink of pullRequestLinks) {
+      const workProductRecord = normalizeRecord(pullRequestLink.workProduct);
+      const existingMetadata = normalizeRecord(workProductRecord?.metadata);
+      const checkMetadata = buildNextPullRequestChecksMetadata(existingMetadata, {
+        collection: "checkSuites",
+        key: checkName ?? `check-suite:${pullRequestNumber}`,
+        status,
+        conclusion,
+        name: checkName,
+        url: checkUrl,
+        deliveryId,
+        eventName,
+      });
+
+      await upsertPullRequestWorkProduct(ctx, config.companyId, pullRequestLink.paperclipIssueId, {
+        repositoryFullName,
+        pullRequestNumber,
+        pullRequestUrl: checkUrl,
+        pullRequestTitle: null,
+        state: normalizeString(existingMetadata?.state),
+        isDraft: normalizeOptionalBoolean(existingMetadata?.draft),
+        isMerged: normalizeOptionalBoolean(existingMetadata?.merged),
+        reviewState: normalizeString(existingMetadata?.reviewState),
+        headRef: normalizeString(existingMetadata?.headRef),
+        headSha: normalizeString(checkSuite.head_sha) ?? normalizeString(existingMetadata?.headSha),
+        baseRef: normalizeString(existingMetadata?.baseRef),
+        baseSha: normalizeString(existingMetadata?.baseSha),
+        existingWorkProduct: pullRequestLink.workProduct,
+        metadataPatch: checkMetadata.metadataPatch,
+        healthStatus: pullRequestHealthStatusFromChecks(checkMetadata.nextActionability),
+      });
+
+      if (checkMetadata.previousActionability === checkMetadata.nextActionability) {
+        continue;
+      }
+
+      const linkWakeQueued = checkMetadata.nextActionability === "failed" || checkMetadata.nextActionability === "passed"
+        ? await maybeWakeIssue(
+          ctx,
+          config.companyId,
+          pullRequestLink.paperclipIssueId,
+          deliveryId,
+          `github:check_suite.${action}:${checkMetadata.nextActionability}`,
+        )
+        : false;
+      wakeQueued ||= linkWakeQueued;
+
+      await appendIssueComment(
+        ctx,
+        config.companyId,
+        pullRequestLink.paperclipIssueId,
+        buildPullRequestCheckBody({
+          eventName: `GitHub check_suite.${action}`,
+          githubPullRequestKey: pullRequestLink.githubPullRequestKey,
+          githubIssueKey: pullRequestLink.githubIssueKey,
+          actorLogin: actorLogin(payload.sender),
+          githubUrl: checkUrl,
+          checkName,
+          status,
+          conclusion,
+          actionability: checkMetadata.nextActionability,
+          wakeQueued: linkWakeQueued,
+        }),
+      );
+
+      await refreshPullRequestLinkMirrorIfPossible(ctx, config, deliveryId, pullRequestLink);
+    }
+  }
+
+  return {
+    processed,
+    reason: processed ? `check_suite:${action}` : "pull-request-link-missing",
+    mappedIssueId,
     wakeQueued,
   };
 }
@@ -1229,7 +2127,7 @@ async function syncPullRequestReviewCommentWebhook(
   }
 
   const pullRequestNumber = getPullRequestNumber(payload);
-  const pullRequestMapping = await resolvePullRequestMapping(
+  const pullRequestLinks = await resolvePullRequestLinks(
     ctx,
     config,
     repositoryFullName,
@@ -1237,42 +2135,59 @@ async function syncPullRequestReviewCommentWebhook(
     normalizeString(pullRequest.html_url),
     [normalizeString(pullRequest.body), normalizeString(pullRequest.title)],
   );
-  if (!pullRequestMapping) {
-    return { processed: false, reason: "pull-request-mapping-missing", mappedIssueId: null, wakeQueued: false };
+  if (pullRequestLinks.length === 0) {
+    return { processed: false, reason: "pull-request-link-missing", mappedIssueId: null, wakeQueued: false };
   }
 
-  const wakeQueued = await maybeWakeIssue(
-    ctx,
-    config.companyId,
-    pullRequestMapping.paperclipIssueId,
-    deliveryId,
-    `github:pull_request_review_comment.${action}`,
-  );
+  let wakeQueued = false;
+  for (const pullRequestLink of pullRequestLinks) {
+    await upsertPullRequestWorkProduct(ctx, config.companyId, pullRequestLink.paperclipIssueId, {
+      repositoryFullName,
+      pullRequestNumber,
+      pullRequestUrl: normalizeString(pullRequest.html_url),
+      pullRequestTitle: normalizeString(pullRequest.title),
+      state: normalizeString(pullRequest.state),
+      isDraft: normalizeOptionalBoolean(pullRequest.draft),
+      isMerged: normalizeOptionalBoolean(pullRequest.merged),
+      reviewState: normalizeString(pullRequest.review_decision),
+      headRef: normalizeString(pullRequest.head?.ref),
+      headSha: normalizeString(pullRequest.head?.sha),
+      baseRef: normalizeString(pullRequest.base?.ref),
+      baseSha: normalizeString(pullRequest.base?.sha),
+      existingWorkProduct: pullRequestLink.workProduct,
+    });
 
-  await appendIssueComment(
-    ctx,
-    config.companyId,
-    pullRequestMapping.paperclipIssueId,
-    buildPullRequestCommentBody({
-      eventName: `GitHub pull_request_review_comment.${action}`,
-      githubPullRequestKey: pullRequestMapping.githubPullRequestKey,
-      githubIssueKey: pullRequestMapping.githubIssueKey,
-      actorLogin: actorLogin(payload.comment?.user, payload.sender),
-      githubUrl: normalizeString(payload.comment?.html_url) ?? pullRequestMapping.pullRequestUrl,
-      commentBody: normalizeString(payload.comment?.body),
-      wakeQueued,
-    }),
-  );
+    const linkWakeQueued = await maybeWakeIssue(
+      ctx,
+      config.companyId,
+      pullRequestLink.paperclipIssueId,
+      deliveryId,
+      `github:pull_request_review_comment.${action}`,
+    );
+    wakeQueued ||= linkWakeQueued;
 
-  const issueMapping = await getOrRecoverIssueMapping(ctx, config, config.companyId, pullRequestMapping.githubIssueKey);
-  if (issueMapping) {
-    await refreshIssueMirror(ctx, config, issueMapping, { deliveryId });
+    await appendIssueComment(
+      ctx,
+      config.companyId,
+      pullRequestLink.paperclipIssueId,
+      buildPullRequestCommentBody({
+        eventName: `GitHub pull_request_review_comment.${action}`,
+        githubPullRequestKey: pullRequestLink.githubPullRequestKey,
+        githubIssueKey: pullRequestLink.githubIssueKey,
+        actorLogin: actorLogin(payload.comment?.user, payload.sender),
+        githubUrl: normalizeString(payload.comment?.html_url) ?? pullRequestLink.pullRequestUrl,
+        commentBody: normalizeString(payload.comment?.body),
+        wakeQueued: linkWakeQueued,
+      }),
+    );
+
+    await refreshPullRequestLinkMirrorIfPossible(ctx, config, deliveryId, pullRequestLink);
   }
 
   return {
     processed: true,
     reason: `pull_request_review_comment:${action}`,
-    mappedIssueId: pullRequestMapping.paperclipIssueId,
+    mappedIssueId: pullRequestLinks[0]?.paperclipIssueId ?? null,
     wakeQueued,
   };
 }
@@ -1392,6 +2307,13 @@ const plugin = definePlugin({
       result = await syncIssueCommentWebhook(currentContext, config, deliveryId, parsed as GitHubIssueCommentPayload);
     } else if (eventType === "pull_request") {
       result = await syncPullRequestWebhook(currentContext, config, deliveryId, parsed as GitHubPullRequestPayload);
+    } else if (eventType === "pull_request_review") {
+      result = await syncPullRequestReviewWebhook(
+        currentContext,
+        config,
+        deliveryId,
+        parsed as GitHubPullRequestReviewPayload,
+      );
     } else if (eventType === "pull_request_review_comment") {
       result = await syncPullRequestReviewCommentWebhook(
         currentContext,
@@ -1399,6 +2321,10 @@ const plugin = definePlugin({
         deliveryId,
         parsed as GitHubPullRequestReviewCommentPayload,
       );
+    } else if (eventType === "check_run") {
+      result = await syncCheckRunWebhook(currentContext, config, deliveryId, parsed as GitHubCheckRunPayload);
+    } else if (eventType === "check_suite") {
+      result = await syncCheckSuiteWebhook(currentContext, config, deliveryId, parsed as GitHubCheckSuitePayload);
     } else {
       result = {
         processed: false,
