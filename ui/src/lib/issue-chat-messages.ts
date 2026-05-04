@@ -279,6 +279,7 @@ function authorNameForComment(
   currentUserId?: string | null,
   userLabelMap?: ReadonlyMap<string, string> | null,
 ) {
+  if (comment.systemAuthor) return comment.systemAuthor;
   if (comment.authorAgentId) {
     return agentMap?.get(comment.authorAgentId)?.name ?? comment.authorAgentId.slice(0, 8);
   }

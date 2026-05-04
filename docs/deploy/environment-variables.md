@@ -46,6 +46,28 @@ These are set automatically by the server when invoking agents:
 | `PAPERCLIP_APPROVAL_STATUS` | Approval decision |
 | `PAPERCLIP_LINKED_ISSUE_IDS` | Comma-separated linked issue IDs |
 
+## Stall Detection (Scheduler)
+
+Paperclip periodically scans `in_progress` and `in_review` issues for agent inactivity and posts system escalation comments. Configuration is global (defaults) or per-project (via the `stallPolicy` project setting).
+
+**Global defaults** (compiled-in, not overridable via environment variables in v1):
+
+| Setting | Default | Description |
+|---------|---------|-------------|
+| `tier1Minutes` | `30` | Minutes of agent silence before posting a Tier 1 stall comment (wakes assignee) |
+| `tier2Minutes` | `120` | Minutes after Tier 1 before posting a Tier 2 stall comment (wakes manager via `chainOfCommand`) |
+
+**Per-project override** — set a `stallPolicy` JSON object in project settings:
+
+```json
+{
+  "tier1Minutes": 30,
+  "tier2Minutes": 120
+}
+```
+
+An issue is excluded from stall detection if it has a pending interaction (expected silence). No auto-reassignment occurs on stall — the manager decides. Stall events are recorded in the audit log with actions `issue.stall_detected_tier1` and `issue.stall_detected_tier2`.
+
 ## LLM Provider Keys (for adapters)
 
 | Variable | Description |
