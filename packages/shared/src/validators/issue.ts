@@ -130,7 +130,7 @@ const issueRequestDepthInputSchema = z
   .nonnegative()
   .transform((value) => clampIssueRequestDepth(value));
 
-export const createIssueSchema = z.object({
+const createIssueBaseSchema = z.object({
   projectId: z.string().uuid().optional().nullable(),
   projectWorkspaceId: z.string().uuid().optional().nullable(),
   goalId: z.string().uuid().optional().nullable(),
@@ -153,9 +153,13 @@ export const createIssueSchema = z.object({
   labelIds: z.array(z.string().uuid()).optional(),
 });
 
+export const createIssueSchema = createIssueBaseSchema.extend({
+  allowDuplicateExternalIssueReference: z.boolean().optional(),
+});
+
 export type CreateIssue = z.infer<typeof createIssueSchema>;
 
-export const createChildIssueSchema = createIssueSchema
+export const createChildIssueSchema = createIssueBaseSchema
   .omit({
     parentId: true,
     inheritExecutionWorkspaceFromIssueId: true,
@@ -163,6 +167,7 @@ export const createChildIssueSchema = createIssueSchema
   .extend({
     acceptanceCriteria: z.array(z.string().trim().min(1).max(500)).max(20).optional(),
     blockParentUntilDone: z.boolean().optional().default(false),
+    allowDuplicateExternalIssueReference: z.boolean().optional(),
   });
 
 export type CreateChildIssue = z.infer<typeof createChildIssueSchema>;
@@ -174,7 +179,7 @@ export const createIssueLabelSchema = z.object({
 
 export type CreateIssueLabel = z.infer<typeof createIssueLabelSchema>;
 
-export const updateIssueSchema = createIssueSchema.partial().extend({
+export const updateIssueSchema = createIssueBaseSchema.partial().extend({
   requestDepth: issueRequestDepthInputSchema.optional(),
   assigneeAgentId: z.string().trim().min(1).optional().nullable(),
   comment: multilineTextSchema.pipe(z.string().min(1)).optional(),

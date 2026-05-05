@@ -1452,6 +1452,123 @@ describeEmbeddedPostgres("issueService.create workspace inheritance", () => {
     ]);
   });
 
+  it("allows the first delegation in a source issue chain when no separate open issue already tracks the GitHub issue", async () => {
+    const companyId = randomUUID();
+    const rootIssueId = randomUUID();
+    const sourceIssueId = randomUUID();
+    const githubIssueUrl = "https://github.com/tensorleap/concierge/issues/366";
+
+    await db.insert(companies).values({
+      id: companyId,
+      name: "Paperclip",
+      issuePrefix: `T${companyId.replace(/-/g, "").slice(0, 6).toUpperCase()}`,
+      requireBoardApprovalForNewAgents: false,
+    });
+
+    await db.insert(issues).values([
+      {
+        id: rootIssueId,
+        companyId,
+        title: "Track Concierge bug",
+        description: `Root context for ${githubIssueUrl}`,
+        status: "in_progress",
+        priority: "medium",
+      },
+      {
+        id: sourceIssueId,
+        companyId,
+        parentId: rootIssueId,
+        title: "Prepare worker handoff",
+        description: "Spin this into an execution issue.",
+        status: "todo",
+        priority: "medium",
+      },
+    ]);
+
+    const child = await svc.create(companyId, {
+      parentId: sourceIssueId,
+      title: "Execution issue",
+      status: "todo",
+    });
+
+    expect(child.parentId).toBe(sourceIssueId);
+    expect(child.title).toBe("Execution issue");
+  });
+
+  it("blocks duplicate GitHub issue execution creation unless the caller explicitly overrides it", async () => {
+    const companyId = randomUUID();
+    const rootIssueId = randomUUID();
+    const sourceIssueId = randomUUID();
+    const existingExecutionIssueId = randomUUID();
+    const githubIssueUrl = "https://github.com/tensorleap/concierge/issues/366";
+
+    await db.insert(companies).values({
+      id: companyId,
+      name: "Paperclip",
+      issuePrefix: `T${companyId.replace(/-/g, "").slice(0, 6).toUpperCase()}`,
+      requireBoardApprovalForNewAgents: false,
+    });
+
+    await db.insert(issues).values([
+      {
+        id: rootIssueId,
+        companyId,
+        title: "Track Concierge bug",
+        description: `Root context for ${githubIssueUrl}`,
+        status: "in_progress",
+        priority: "medium",
+      },
+      {
+        id: sourceIssueId,
+        companyId,
+        parentId: rootIssueId,
+        title: "Prepare worker handoff",
+        description: "Spin this into an execution issue.",
+        status: "todo",
+        priority: "medium",
+      },
+      {
+        id: existingExecutionIssueId,
+        companyId,
+        title: "Existing execution issue",
+        description: `Already tracking ${githubIssueUrl}`,
+        status: "in_progress",
+        priority: "medium",
+      },
+    ]);
+
+    await expect(svc.create(companyId, {
+      parentId: sourceIssueId,
+      title: "Duplicate execution issue",
+      status: "todo",
+    })).rejects.toMatchObject({
+      status: 409,
+      details: expect.objectContaining({
+        kind: "duplicate_external_issue_reference",
+        normalizedReferences: ["https://github.com/tensorleap/concierge/issues/366"],
+        existingIssues: [
+          expect.objectContaining({
+            issue: expect.objectContaining({
+              id: existingExecutionIssueId,
+              title: "Existing execution issue",
+            }),
+          }),
+        ],
+        overrideField: "allowDuplicateExternalIssueReference",
+      }),
+    });
+
+    const duplicate = await svc.create(companyId, {
+      parentId: sourceIssueId,
+      title: "Duplicate execution issue",
+      status: "todo",
+      allowDuplicateExternalIssueReference: true,
+    });
+
+    expect(duplicate.title).toBe("Duplicate execution issue");
+    expect(duplicate.parentId).toBe(sourceIssueId);
+  });
+
   it("clamps helper-created child requestDepth to the safe maximum", async () => {
     const companyId = randomUUID();
     const projectId = randomUUID();

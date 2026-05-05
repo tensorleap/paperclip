@@ -5,6 +5,7 @@ import type { ComponentProps, ReactNode } from "react";
 import { createRoot } from "react-dom/client";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { ApiError } from "../api/client";
 import { NewIssueDialog } from "./NewIssueDialog";
 
 const dialogState = vi.hoisted(() => ({
@@ -416,6 +417,59 @@ describe("NewIssueDialog", () => {
       expect.objectContaining({
         title: "Typed issue",
         description: "Typed description",
+      }),
+    );
+
+    act(() => root.unmount());
+  });
+
+  it("lets the board deliberately override duplicate GitHub issue conflicts", async () => {
+    dialogState.newIssueDefaults = {
+      title: "Duplicate execution issue",
+    };
+    const errorMessage = "Open issue PAP-17 already references GitHub issue tensorleap/concierge#366. Reuse the existing issue or set allowDuplicateExternalIssueReference=true to create a deliberate duplicate.";
+    mockIssuesApi.create
+      .mockRejectedValueOnce(new ApiError(errorMessage, 409, {
+        error: errorMessage,
+        details: {
+          kind: "duplicate_external_issue_reference",
+        },
+      }))
+      .mockResolvedValueOnce({
+        id: "issue-3",
+        companyId: "company-1",
+        identifier: "PAP-3",
+      });
+
+    const { root } = renderDialog(container);
+    await flush();
+
+    const submitButton = Array.from(container.querySelectorAll("button"))
+      .find((button) => button.textContent?.includes("Create Issue"));
+    expect(submitButton).not.toBeUndefined();
+
+    await act(async () => {
+      submitButton!.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+    });
+    await flush();
+
+    expect(container.textContent).toContain(errorMessage);
+
+    const overrideButton = Array.from(container.querySelectorAll("button"))
+      .find((button) => button.textContent?.includes("Create Duplicate Anyway"));
+    expect(overrideButton).not.toBeUndefined();
+
+    await act(async () => {
+      overrideButton!.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+    });
+    await flush();
+
+    expect(mockIssuesApi.create).toHaveBeenNthCalledWith(
+      2,
+      "company-1",
+      expect.objectContaining({
+        title: "Duplicate execution issue",
+        allowDuplicateExternalIssueReference: true,
       }),
     );
 

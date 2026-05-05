@@ -8,6 +8,7 @@ import {
   documents,
   goals,
   heartbeatRuns,
+  issueComments,
   issueDocuments,
   instanceSettings,
   issueRelations,
@@ -39,6 +40,7 @@ describeEmbeddedPostgres("issueThreadInteractionService", () => {
   }, 20_000);
 
   afterEach(async () => {
+    await db.delete(issueComments);
     await db.delete(issueThreadInteractions);
     await db.delete(issueDocuments);
     await db.delete(documentRevisions);
@@ -260,6 +262,100 @@ describeEmbeddedPostgres("issueThreadInteractionService", () => {
     const children = await issuesSvc.list(companyId, { parentId: issueId });
     expect(children).toHaveLength(1);
     expect(children[0]?.title).toBe("Create the root follow-up");
+  });
+
+  it("blocks suggested-task acceptance when the source comment points at a GitHub issue already tracked by another open issue", async () => {
+    const companyId = randomUUID();
+    const goalId = randomUUID();
+    const issueId = randomUUID();
+    const existingIssueId = randomUUID();
+    const commentId = randomUUID();
+    const githubIssueUrl = "https://github.com/tensorleap/concierge/issues/366";
+
+    await db.insert(companies).values({
+      id: companyId,
+      name: "Paperclip",
+      issuePrefix: `T${companyId.replace(/-/g, "").slice(0, 6).toUpperCase()}`,
+      requireBoardApprovalForNewAgents: false,
+    });
+    await instanceSettingsService(db).updateExperimental({ enableIsolatedWorkspaces: false });
+
+    await db.insert(goals).values({
+      id: goalId,
+      companyId,
+      title: "Persist thread interactions",
+      level: "task",
+      status: "active",
+    });
+    await db.insert(issues).values([
+      {
+        id: issueId,
+        companyId,
+        goalId,
+        title: "Parent issue",
+        status: "in_progress",
+        priority: "medium",
+      },
+      {
+        id: existingIssueId,
+        companyId,
+        goalId,
+        title: "Existing execution issue",
+        description: `Already tracking ${githubIssueUrl}`,
+        status: "in_progress",
+        priority: "medium",
+      },
+    ]);
+    await db.insert(issueComments).values({
+      id: commentId,
+      companyId,
+      issueId,
+      authorUserId: "local-board",
+      body: `Delegate the work from ${githubIssueUrl}`,
+    });
+
+    const created = await interactionsSvc.create({
+      id: issueId,
+      companyId,
+    }, {
+      kind: "suggest_tasks",
+      continuationPolicy: "wake_assignee",
+      sourceCommentId: commentId,
+      payload: {
+        version: 1,
+        tasks: [
+          {
+            clientKey: "root",
+            title: "Create the root follow-up",
+          },
+        ],
+      },
+    }, {
+      userId: "local-board",
+    });
+
+    await expect(interactionsSvc.acceptSuggestedTasks({
+      id: issueId,
+      companyId,
+      goalId,
+      projectId: null,
+    }, created.id, {}, {
+      userId: "local-board",
+    })).rejects.toMatchObject({
+      status: 409,
+      details: expect.objectContaining({
+        kind: "duplicate_external_issue_reference",
+        normalizedReferences: ["https://github.com/tensorleap/concierge/issues/366"],
+        existingIssues: [
+          expect.objectContaining({
+            issue: expect.objectContaining({
+              id: existingIssueId,
+              title: "Existing execution issue",
+            }),
+          }),
+        ],
+      }),
+    });
   });
 
   it("rejects partial acceptance when a selected task omits its selected-tree parent", async () => {

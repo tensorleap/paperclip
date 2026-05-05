@@ -519,11 +519,16 @@ export type {
 export {
   ISSUE_REFERENCE_IDENTIFIER_RE,
   buildIssueReferenceHref,
+  extractGitHubIssueReferenceMatches,
   extractIssueReferenceIdentifiers,
   extractIssueReferenceMatches,
+  findGitHubIssueReferenceMatches,
   findIssueReferenceMatches,
   normalizeIssueIdentifier,
+  parseGitHubIssueReferenceHref,
   parseIssueReferenceHref,
+  type GitHubIssueReference,
+  type GitHubIssueReferenceMatch,
   type IssueReferenceMatch,
 } from "./issue-references.js";
 

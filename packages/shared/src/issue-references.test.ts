@@ -1,9 +1,12 @@
 import { describe, expect, it } from "vitest";
 import {
   buildIssueReferenceHref,
+  extractGitHubIssueReferenceMatches,
   extractIssueReferenceIdentifiers,
+  findGitHubIssueReferenceMatches,
   findIssueReferenceMatches,
   normalizeIssueIdentifier,
+  parseGitHubIssueReferenceHref,
   parseIssueReferenceHref,
 } from "./issue-references.js";
 
@@ -64,5 +67,69 @@ describe("issue references", () => {
     ].join("\n");
 
     expect(extractIssueReferenceIdentifiers(markdown)).toEqual(["PAP-1", "PAP-5"]);
+  });
+
+  it("parses canonical GitHub issue hrefs into normalized references", () => {
+    expect(parseGitHubIssueReferenceHref("https://github.com/TensorLeap/Concierge/issues/366#issuecomment-1")).toEqual({
+      owner: "tensorleap",
+      repo: "concierge",
+      issueNumber: 366,
+      normalizedUrl: "https://github.com/tensorleap/concierge/issues/366",
+      label: "tensorleap/concierge#366",
+    });
+    expect(parseGitHubIssueReferenceHref("github.com/paperclipai/paperclip/issues/43?foo=bar")).toEqual({
+      owner: "paperclipai",
+      repo: "paperclip",
+      issueNumber: 43,
+      normalizedUrl: "https://github.com/paperclipai/paperclip/issues/43",
+      label: "paperclipai/paperclip#43",
+    });
+    expect(parseGitHubIssueReferenceHref("https://github.com/paperclipai/paperclip/pull/43")).toBeNull();
+  });
+
+  it("finds and dedupes GitHub issue URLs in markdown while ignoring code", () => {
+    const markdown = [
+      "See https://github.com/TensorLeap/Concierge/issues/366 and [again](https://github.com/tensorleap/concierge/issues/366).",
+      "",
+      "`https://github.com/tensorleap/concierge/issues/999` should not count.",
+      "",
+      "```md",
+      "https://github.com/paperclipai/paperclip/issues/10",
+      "```",
+      "",
+      "Follow-up: github.com/paperclipai/paperclip/issues/43).",
+    ].join("\n");
+
+    expect(findGitHubIssueReferenceMatches("Review github.com/paperclipai/paperclip/issues/43).")).toEqual([
+      {
+        owner: "paperclipai",
+        repo: "paperclip",
+        issueNumber: 43,
+        normalizedUrl: "https://github.com/paperclipai/paperclip/issues/43",
+        label: "paperclipai/paperclip#43",
+        index: 7,
+        length: 42,
+        matchedText: "github.com/paperclipai/paperclip/issues/43",
+      },
+    ]);
+
+    expect(extractGitHubIssueReferenceMatches(markdown)).toEqual([
+      expect.objectContaining({
+        owner: "tensorleap",
+        repo: "concierge",
+        issueNumber: 366,
+        normalizedUrl: "https://github.com/tensorleap/concierge/issues/366",
+        label: "tensorleap/concierge#366",
+        matchedText: "https://github.com/TensorLeap/Concierge/issues/366",
+      }),
+      expect.objectContaining({
+        owner: "paperclipai",
+        repo: "paperclip",
+        issueNumber: 43,
+        normalizedUrl: "https://github.com/paperclipai/paperclip/issues/43",
+        label: "paperclipai/paperclip#43",
+        matchedText: "github.com/paperclipai/paperclip/issues/43",
+      }),
+    ]);
   });
 });

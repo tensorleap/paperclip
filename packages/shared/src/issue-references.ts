@@ -1,4 +1,5 @@
 export const ISSUE_REFERENCE_IDENTIFIER_RE = /^[A-Z]+-\d+$/;
+const GITHUB_ISSUE_HOSTS = new Set(["github.com", "www.github.com"]);
 
 export interface IssueReferenceMatch {
   index: number;
@@ -7,7 +8,22 @@ export interface IssueReferenceMatch {
   matchedText: string;
 }
 
+export interface GitHubIssueReference {
+  owner: string;
+  repo: string;
+  issueNumber: number;
+  normalizedUrl: string;
+  label: string;
+}
+
+export interface GitHubIssueReferenceMatch extends GitHubIssueReference {
+  index: number;
+  length: number;
+  matchedText: string;
+}
+
 const ISSUE_REFERENCE_TOKEN_RE = /https?:\/\/[^\s<>()]+|\/[^\s<>()]+|[A-Z]+-\d+/gi;
+const GITHUB_ISSUE_REFERENCE_TOKEN_RE = /(?:https?:\/\/)?github\.com\/[^\s<>()]+/gi;
 
 function preserveNewlinesAsWhitespace(value: string) {
   return value.replace(/[^\n]/g, " ");
@@ -89,6 +105,31 @@ function trimTrailingPunctuation(token: string): string {
   return trimmed;
 }
 
+function toGitHubIssueReference(url: URL): GitHubIssueReference | null {
+  if (!GITHUB_ISSUE_HOSTS.has(url.hostname.toLowerCase())) return null;
+
+  const segments = url.pathname
+    .split("/")
+    .map((segment) => segment.trim())
+    .filter(Boolean);
+  if (segments.length < 4) return null;
+  if (segments[2]?.toLowerCase() !== "issues") return null;
+  if (!/^\d+$/.test(segments[3] ?? "")) return null;
+
+  const owner = (segments[0] ?? "").toLowerCase();
+  const repo = (segments[1] ?? "").toLowerCase();
+  const issueNumber = Number.parseInt(segments[3]!, 10);
+  if (!owner || !repo || !Number.isInteger(issueNumber) || issueNumber <= 0) return null;
+
+  return {
+    owner,
+    repo,
+    issueNumber,
+    normalizedUrl: `https://github.com/${owner}/${repo}/issues/${issueNumber}`,
+    label: `${owner}/${repo}#${issueNumber}`,
+  };
+}
+
 export function normalizeIssueIdentifier(value: string): string | null {
   const trimmed = value.trim().toUpperCase();
   return ISSUE_REFERENCE_IDENTIFIER_RE.test(trimmed) ? trimmed : null;
@@ -128,6 +169,22 @@ export function parseIssueReferenceHref(href: string): { identifier: string } | 
   return null;
 }
 
+export function parseGitHubIssueReferenceHref(href: string): GitHubIssueReference | null {
+  const raw = href.trim();
+  if (!raw) return null;
+
+  let url: URL;
+  try {
+    url = raw.startsWith("http://") || raw.startsWith("https://")
+      ? new URL(raw)
+      : new URL(`https://${raw}`);
+  } catch {
+    return null;
+  }
+
+  return toGitHubIssueReference(url);
+}
+
 export function findIssueReferenceMatches(text: string): IssueReferenceMatch[] {
   if (!text) return [];
 
@@ -159,6 +216,32 @@ export function findIssueReferenceMatches(text: string): IssueReferenceMatch[] {
   return matches;
 }
 
+export function findGitHubIssueReferenceMatches(text: string): GitHubIssueReferenceMatch[] {
+  if (!text) return [];
+
+  const matches: GitHubIssueReferenceMatch[] = [];
+  let match: RegExpExecArray | null;
+  const re = new RegExp(GITHUB_ISSUE_REFERENCE_TOKEN_RE);
+
+  while ((match = re.exec(text)) !== null) {
+    const rawToken = match[0];
+    const cleanedToken = trimTrailingPunctuation(rawToken);
+    if (!cleanedToken) continue;
+
+    const reference = parseGitHubIssueReferenceHref(cleanedToken);
+    if (!reference) continue;
+
+    matches.push({
+      ...reference,
+      index: match.index,
+      length: cleanedToken.length,
+      matchedText: cleanedToken,
+    });
+  }
+
+  return matches;
+}
+
 export function extractIssueReferenceIdentifiers(markdown: string): string[] {
   const scrubbed = stripMarkdownCode(markdown);
   const seen = new Set<string>();
@@ -181,6 +264,20 @@ export function extractIssueReferenceMatches(markdown: string): IssueReferenceMa
   for (const match of findIssueReferenceMatches(scrubbed)) {
     if (seen.has(match.identifier)) continue;
     seen.add(match.identifier);
+    ordered.push(match);
+  }
+
+  return ordered;
+}
+
+export function extractGitHubIssueReferenceMatches(markdown: string): GitHubIssueReferenceMatch[] {
+  const scrubbed = stripMarkdownCode(markdown);
+  const seen = new Set<string>();
+  const ordered: GitHubIssueReferenceMatch[] = [];
+
+  for (const match of findGitHubIssueReferenceMatches(scrubbed)) {
+    if (seen.has(match.normalizedUrl)) continue;
+    seen.add(match.normalizedUrl);
     ordered.push(match);
   }
 

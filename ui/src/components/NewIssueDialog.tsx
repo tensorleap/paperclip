@@ -4,6 +4,7 @@ import { pickTextColorForSolidBg } from "@/lib/color-contrast";
 import { useDialog } from "../context/DialogContext";
 import { useCompany } from "../context/CompanyContext";
 import { executionWorkspacesApi } from "../api/execution-workspaces";
+import { ApiError } from "../api/client";
 import { issuesApi } from "../api/issues";
 import { instanceSettingsApi } from "../api/instanceSettings";
 import { projectsApi } from "../api/projects";
@@ -95,6 +96,12 @@ type StagedIssueFile = {
 
 const ISSUE_OVERRIDE_ADAPTER_TYPES = new Set(["claude_local", "codex_local", "opencode_local"]);
 const STAGED_FILE_ACCEPT = "image/*,application/pdf,text/plain,text/markdown,application/json,text/csv,text/html,.md,.markdown";
+
+function isDuplicateExternalIssueReferenceConflict(error: unknown) {
+  if (!(error instanceof ApiError) || !error.body || typeof error.body !== "object") return false;
+  const details = (error.body as { details?: { kind?: string } }).details;
+  return details?.kind === "duplicate_external_issue_reference";
+}
 
 const ISSUE_THINKING_EFFORT_OPTIONS = {
   claude_local: [
@@ -841,7 +848,7 @@ export function NewIssueDialog() {
     closeNewIssue();
   }
 
-  function handleSubmit() {
+  function handleSubmit(options?: { allowDuplicateExternalIssueReference?: boolean }) {
     const currentTitle = titleRef.current.trim();
     const currentDescription = descriptionRef.current.trim();
     if (!effectiveCompanyId || !currentTitle || createIssue.isPending) return;
@@ -890,6 +897,7 @@ export function NewIssueDialog() {
         : {}),
       ...(executionWorkspaceSettings ? { executionWorkspaceSettings } : {}),
       ...(executionPolicy ? { executionPolicy } : {}),
+      ...(options?.allowDuplicateExternalIssueReference ? { allowDuplicateExternalIssueReference: true } : {}),
     });
   }
 
@@ -1046,6 +1054,7 @@ export function NewIssueDialog() {
   const canDiscardDraft = hasDraft || hasSavedDraft;
   const createIssueErrorMessage =
     createIssue.error instanceof Error ? createIssue.error.message : "Failed to create issue. Try again.";
+  const hasDuplicateExternalIssueConflict = isDuplicateExternalIssueReferenceConflict(createIssue.error);
   const stagedDocuments = stagedFiles.filter((file) => file.kind === "document");
   const stagedAttachments = stagedFiles.filter((file) => file.kind === "attachment");
 
@@ -1800,6 +1809,20 @@ export function NewIssueDialog() {
                   <Loader2 className="h-3 w-3 animate-spin" />
                   Creating issue...
                 </span>
+              ) : hasDuplicateExternalIssueConflict ? (
+                <div className="flex flex-col items-end gap-2">
+                  <span className="inline-flex items-start justify-end gap-1.5 text-xs text-amber-700 dark:text-amber-300">
+                    <AlertTriangle className="mt-0.5 h-3 w-3 shrink-0" />
+                    <span>{createIssueErrorMessage}</span>
+                  </span>
+                  <Button
+                    variant="outline"
+                    size="sm"
+                    onClick={() => handleSubmit({ allowDuplicateExternalIssueReference: true })}
+                  >
+                    Create Duplicate Anyway
+                  </Button>
+                </div>
               ) : createIssue.isError ? (
                 <span className="text-xs text-destructive">{createIssueErrorMessage}</span>
               ) : null}
@@ -1808,7 +1831,7 @@ export function NewIssueDialog() {
               size="sm"
               className="min-w-[8.5rem] disabled:opacity-100"
               disabled={!titleHasText || createIssue.isPending}
-              onClick={handleSubmit}
+              onClick={() => handleSubmit()}
               aria-busy={createIssue.isPending}
             >
               <span className="inline-flex items-center justify-center gap-1.5">
