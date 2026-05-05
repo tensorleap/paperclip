@@ -1265,6 +1265,54 @@ export function issueRoutes(
     }
 
     const actor = getActorInfo(req);
+
+    // Closure Order Protocol: reject documents whose Status: field diverges from the actual issue API status.
+    // Prevents agents from writing false-completion signals (e.g. Status: done before the PATCH is confirmed).
+    // See TEN-186 / TEN-181.
+    const VALID_ISSUE_STATUSES = ["backlog", "todo", "in_progress", "in_review", "done", "blocked", "cancelled"];
+    const docStatusMatch = /^[-*]\s+Status:\s+(\S+)/im.exec(req.body.body ?? "");
+    if (docStatusMatch) {
+      const docStatus = docStatusMatch[1].toLowerCase().replace(/[.,;:]+$/, "");
+      if (VALID_ISSUE_STATUSES.includes(docStatus) && docStatus !== issue.status) {
+        logger.warn(
+          {
+            issueId: issue.id,
+            issueIdentifier: issue.identifier,
+            issueApiStatus: issue.status,
+            documentStatus: docStatus,
+            documentKey: keyParsed.data,
+            agentId: actor.agentId,
+            runId: actor.runId,
+          },
+          "status_divergence: document Status field does not match issue API status — rejecting write",
+        );
+        await logActivity(db, {
+          companyId: issue.companyId,
+          actorType: actor.actorType,
+          actorId: actor.actorId,
+          agentId: actor.agentId,
+          runId: actor.runId,
+          action: "issue.document_status_divergence",
+          entityType: "issue",
+          entityId: issue.id,
+          details: {
+            key: keyParsed.data,
+            documentStatus: docStatus,
+            issueApiStatus: issue.status,
+          },
+        });
+        res.status(422).json({
+          error: "Document status diverges from issue API status",
+          documentStatus: docStatus,
+          issueApiStatus: issue.status,
+          message:
+            `Cannot write a document with "Status: ${docStatus}" when the issue API status is "${issue.status}". ` +
+            `Update the issue status via PATCH /api/issues/${issue.id} first, then write the document.`,
+        });
+        return;
+      }
+    }
+
     const referenceSummaryBefore = await issueReferencesSvc.listIssueReferenceSummary(issue.id);
     const result = await documentsSvc.upsertIssueDocument({
       issueId: issue.id,
