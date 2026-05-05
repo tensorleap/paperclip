@@ -73,6 +73,12 @@ const catchUpPolicyDescriptions: Record<string, string> = {
   skip_missed: "Ignore schedule windows that were missed while the routine or scheduler was paused.",
   enqueue_missed_with_cap: "Catch up missed schedule windows in capped batches after recovery.",
 };
+const signingModeLabels: Record<string, string> = {
+  bearer: "Bearer token",
+  hmac_sha256: "HMAC SHA-256 (Paperclip format)",
+  github_hmac: "GitHub / Sentry (X-Hub-Signature-256)",
+  none: "None (no auth)",
+};
 const signingModeDescriptions: Record<string, string> = {
   bearer: "Expect a shared bearer token in the Authorization header.",
   hmac_sha256: "Expect an HMAC SHA-256 signature over the request using the shared secret.",
@@ -215,10 +221,11 @@ function TriggerEditor({
                 </SelectTrigger>
                 <SelectContent>
                   {signingModes.map((mode) => (
-                    <SelectItem key={mode} value={mode}>{mode}</SelectItem>
+                    <SelectItem key={mode} value={mode}>{signingModeLabels[mode] ?? mode}</SelectItem>
                   ))}
                 </SelectContent>
               </Select>
+              <p className="text-xs text-muted-foreground">{signingModeDescriptions[draft.signingMode]}</p>
             </div>
             {!SIGNING_MODES_WITHOUT_REPLAY_WINDOW.has(draft.signingMode) && (
               <div className="space-y-1.5">
@@ -1032,7 +1039,7 @@ export function RoutineDetail() {
                       </SelectTrigger>
                       <SelectContent>
                         {signingModes.map((mode) => (
-                          <SelectItem key={mode} value={mode}>{mode}</SelectItem>
+                          <SelectItem key={mode} value={mode}>{signingModeLabels[mode] ?? mode}</SelectItem>
                         ))}
                       </SelectContent>
                     </Select>
