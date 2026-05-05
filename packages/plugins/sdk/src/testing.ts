@@ -675,6 +675,14 @@ export function createTestHarness(options: TestHarnessOptions): TestHarness {
         }
         if (input?.originId) out = out.filter((issue) => issue.originId === input.originId);
         if (input?.status) out = out.filter((issue) => issue.status === input.status);
+        if (input?.q) {
+          const q = input.q.toLowerCase();
+          out = out.filter((issue) =>
+            (issue.title?.toLowerCase().includes(q) ?? false) ||
+            (issue.description?.toLowerCase().includes(q) ?? false) ||
+            (issue.identifier?.toLowerCase().includes(q) ?? false),
+          );
+        }
         if (input?.offset) out = out.slice(input.offset);
         if (input?.limit) out = out.slice(0, input.limit);
         return out;
