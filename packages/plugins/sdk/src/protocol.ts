@@ -734,6 +734,7 @@ export interface WorkerToHostMethods {
       originKind?: string;
       originId?: string;
       status?: string;
+      q?: string;
       limit?: number;
       offset?: number;
     },

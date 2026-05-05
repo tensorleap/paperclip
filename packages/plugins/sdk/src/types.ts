@@ -1101,6 +1101,8 @@ export interface PluginIssuesClient {
     originKind?: PluginIssueOriginKind;
     originId?: string;
     status?: Issue["status"];
+    /** Full-text search query applied across issue title, description, and comments. */
+    q?: string;
     limit?: number;
     offset?: number;
   }): Promise<Issue[]>;
