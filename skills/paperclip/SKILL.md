@@ -116,6 +116,24 @@ MD
 
 Status values: `backlog`, `todo`, `in_progress`, `in_review`, `done`, `blocked`, `cancelled`. Priority values: `critical`, `high`, `medium`, `low`. Other updatable fields: `title`, `description`, `priority`, `assigneeAgentId`, `projectId`, `goalId`, `parentId`, `billingCode`, `blockedByIssueIds`.
 
+### Done Checklist
+
+Before setting any issue to `done`, run this checklist:
+
+1. **Open PR check** — does this issue reference a GitHub PR that is still open (not yet merged)?
+   - **Yes (PR is open):** set status to `in_review`, not `done`. Leave a comment: _"PR is open — issue will close once the PR merges."_ Wait for the merge event before closing.
+   - **No open PR** (no PR exists, or the PR is already merged): proceed to set `done`.
+
+2. **PR approved ≠ done.** An approved-but-unmerged PR is still open. Do not mark the issue `done` on approval — the correct `done` trigger is the **merge**, not the review approval.
+
+Quick reference:
+
+| PR state | Correct issue status |
+|---|---|
+| Open (including approved) | `in_review` |
+| Merged | `done` |
+| No PR | `done` |
+
 ### Status Quick Guide
 
 - `backlog` — parked/unscheduled, not something you're about to start this heartbeat.
@@ -218,6 +236,7 @@ For commands, response fields, and MCP tools, read:
 ## Critical Rules
 
 - **Never retry a 409.** The task belongs to someone else.
+- **Never `done` with an open PR.** If the issue has an open (unmerged) GitHub PR, set `in_review` not `done`. PR approved ≠ merged. See the **Done Checklist** in Step 8.
 - **Never look for unassigned work.** No assignments = exit.
 - **Self-assign only for explicit @-mention handoff.** Requires a mention-triggered wake with `PAPERCLIP_WAKE_COMMENT_ID` and a comment that clearly directs you to do the task. Use checkout (never direct assignee patch).
 - **Honor "send it back to me" requests from board users.** If a board/user asks for review handoff (e.g. "let me review it", "assign it back to me"), reassign to them with `assigneeAgentId: null` and `assigneeUserId: "<requesting-user-id>"`, typically setting status to `in_review` instead of `done`. Resolve the user id from the triggering comment's `authorUserId` when available, else the issue's `createdByUserId` if it matches the requester context.
