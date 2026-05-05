@@ -1,0 +1,105 @@
+name: Paperclip PR Notify
+
+on:
+  check_suite:
+    types: [completed]
+  pull_request:
+    types: [opened, closed, synchronize, reopened]
+  pull_request_review:
+    types: [submitted]
+  issues:
+    types: [opened, assigned, closed]
+  issue_comment:
+    types: [created]
+
+permissions:
+  contents: read
+
+jobs:
+  notify:
+    name: Forward to Paperclip
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Filter and forward event
+        env:
+          PAPERCLIP_WEBHOOK_URL: ${{ secrets.PAPERCLIP_WEBHOOK_URL }}
+          PAPERCLIP_WEBHOOK_SECRET: ${{ secrets.PAPERCLIP_WEBHOOK_SECRET }}
+          EVENT_NAME: ${{ github.event_name }}
+          EVENT_ACTION: ${{ github.event.action }}
+          REPO: ${{ github.repository }}
+          EVENT_PAYLOAD: ${{ toJson(github.event) }}
+        run: |
+          set -euo pipefail
+
+          python3 - <<'PYEOF'
+          import json, hmac, hashlib, os, sys, urllib.request, urllib.error
+
+          event_name   = os.environ["EVENT_NAME"]
+          event_action = os.environ["EVENT_ACTION"]
+          repo         = os.environ["REPO"]
+          secret       = os.environ["PAPERCLIP_WEBHOOK_SECRET"].encode()
+          url          = os.environ["PAPERCLIP_WEBHOOK_URL"]
+          payload      = json.loads(os.environ["EVENT_PAYLOAD"])
+
+          # ── check_suite filter ────────────────────────────────────────────
+          if event_name == "check_suite":
+              conclusion = payload.get("check_suite", {}).get("conclusion", "")
+              linked_prs = payload.get("check_suite", {}).get("pull_requests", [])
+              if not linked_prs:
+                  print(f"Skipping: check_suite with no linked open PRs")
+                  sys.exit(0)
+              if conclusion not in ("failure", "timed_out", "action_required"):
+                  print(f"Skipping: check_suite.completed (conclusion={conclusion})")
+                  sys.exit(0)
+              print(f"Forwarding check_suite.completed (conclusion={conclusion}, prs={len(linked_prs)})")
+
+          # ── pull_request_review filter ────────────────────────────────────
+          elif event_name == "pull_request_review":
+              state = payload.get("review", {}).get("state", "").lower()
+              if state not in ("approved", "changes_requested"):
+                  print(f"Skipping: pull_request_review.submitted (state={state})")
+                  sys.exit(0)
+              print(f"Forwarding pull_request_review.submitted (state={state})")
+
+          # ── Other events pass the GitHub Actions trigger filter already ───
+          else:
+              print(f"Forwarding {event_name}.{event_action}")
+
+          # ── Resolve issue/PR number ───────────────────────────────────────
+          if event_name in ("pull_request", "pull_request_review"):
+              number = payload.get("pull_request", {}).get("number", 0)
+          elif event_name in ("issues", "issue_comment"):
+              number = payload.get("issue", {}).get("number", 0)
+          elif event_name == "check_suite":
+              prs = payload.get("check_suite", {}).get("pull_requests", [])
+              number = prs[0].get("number", 0) if prs else 0
+          else:
+              number = 0
+
+          # ── Build and sign payload ────────────────────────────────────────
+          body = json.dumps({
+              "event":   f"{event_name}.{event_action}",
+              "repo":    repo,
+              "number":  number,
+              "payload": payload,
+          }, separators=(",", ":")).encode()
+
+          sig = "sha256=" + hmac.new(secret, body, hashlib.sha256).hexdigest()
+
+          # ── Deliver ───────────────────────────────────────────────────────
+          req = urllib.request.Request(
+              url,
+              data=body,
+              headers={
+                  "Content-Type":        "application/json",
+                  "X-Hub-Signature-256": sig,
+              },
+              method="POST",
+          )
+          try:
+              with urllib.request.urlopen(req, timeout=10) as resp:
+                  print(f"Delivered (HTTP {resp.status})")
+          except urllib.error.HTTPError as exc:
+              print(f"Delivery failed (HTTP {exc.code}): {exc.read().decode(errors='replace')}")
+              sys.exit(1)
+          PYEOF
