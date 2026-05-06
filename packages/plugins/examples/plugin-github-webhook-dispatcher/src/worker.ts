@@ -219,9 +219,10 @@ async function findTenIssue(
   companyId: string,
   githubRef: string,
 ): Promise<{ id: string; identifier: string } | null> {
-  const results = await ctx.issues.list({ companyId, q: githubRef, limit: 10 });
+  // No limit: text search may tokenize the query and return many broad matches;
+  // we need all candidates so the exact-string filter below can find the right one.
+  const results = await ctx.issues.list({ companyId, q: githubRef });
   if (!results || results.length === 0) return null;
-  // The text search may tokenize the query and return broad matches.
   // Only accept issues where the ref literally appears in title or description.
   const needle = githubRef.toLowerCase();
   const exact = results.find(
