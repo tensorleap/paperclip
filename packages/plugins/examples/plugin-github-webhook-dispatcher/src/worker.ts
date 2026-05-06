@@ -233,6 +233,40 @@ async function findTenIssue(
   return { id: exact.id, identifier: exact.identifier ?? exact.id };
 }
 
+// Extracts a TEN issue identifier (e.g. "TEN-334") from a PR's head branch name or title.
+// Returns the canonical uppercase form, or null if no match found.
+function extractTenIdentifierFromPR(payload: Record<string, unknown>): string | null {
+  const pr = payload.pull_request as Record<string, unknown> | null | undefined;
+  if (!pr) return null;
+
+  const headBranch = str((pr.head as Record<string, unknown> | null | undefined)?.ref);
+  const title = str(pr.title as unknown);
+
+  const pattern = /\bten[_-](\d+)\b/i;
+
+  // Check branch name first (more structured), then title
+  for (const text of [headBranch, title]) {
+    if (!text) continue;
+    const match = text.match(pattern);
+    if (match) return `TEN-${match[1]}`;
+  }
+
+  return null;
+}
+
+async function findTenIssueByIdentifier(
+  ctx: PluginContext,
+  companyId: string,
+  identifier: string,
+): Promise<{ id: string; identifier: string } | null> {
+  const results = await ctx.issues.list({ companyId, q: identifier, limit: 10 });
+  if (!results || results.length === 0) return null;
+  const normalizedId = identifier.toUpperCase();
+  const exact = results.find((issue) => issue.identifier?.toUpperCase() === normalizedId);
+  if (!exact) return null;
+  return { id: exact.id, identifier: exact.identifier ?? exact.id };
+}
+
 // ──────────────────────────────────────────────
 // Plugin definition
 // ──────────────────────────────────────────────
@@ -337,8 +371,27 @@ const plugin = definePlugin({
     const summary = buildSummary(eventType, action, payload);
     const commentBody = buildWakeComment(eventType, action, githubRef, summary, input.rawBody);
 
-    // Search for matching TEN issue
-    const matchedIssue = await findTenIssue(currentContext, config.companyId, githubRef);
+    // Search for matching TEN issue — primary strategy: full-text search for the GitHub ref
+    let matchedIssue = await findTenIssue(currentContext, config.companyId, githubRef);
+
+    // Fallback: if no match, parse TEN identifier from PR branch/title and look up directly
+    if (!matchedIssue) {
+      const tenIdentifier = extractTenIdentifierFromPR(payload);
+      if (tenIdentifier) {
+        matchedIssue = await findTenIssueByIdentifier(currentContext, config.companyId, tenIdentifier);
+        if (matchedIssue) {
+          currentContext.logger.info("Matched issue via PR branch/title fallback", {
+            githubRef,
+            tenIdentifier,
+            issueId: matchedIssue.id,
+            identifier: matchedIssue.identifier,
+            eventType,
+            action,
+            deliveryId,
+          });
+        }
+      }
+    }
 
     let matchedIssueId: string | null = null;
     let reason: string;
