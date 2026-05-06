@@ -455,6 +455,98 @@ describe("check_suite events", () => {
 });
 
 // ──────────────────────────────────────────────
+// PR branch/title fallback — TEN-427
+// ──────────────────────────────────────────────
+
+describe("PR branch/title fallback", () => {
+  it("dispatches pull_request_review.submitted to TEN-334 when branch contains ten-334", async () => {
+    const companyId = randomUUID();
+    const secretRef = randomUUID();
+    // Issue has no githubRef in description — primary text-search will miss it
+    const issue = makeIssue({ companyId, identifier: "TEN-334" });
+    const harness = buildHarness(companyId, secretRef);
+    harness.seed({ issues: [issue] });
+    await plugin.definition.setup(harness.ctx);
+
+    const payload = {
+      action: "submitted",
+      review: {
+        state: "approved",
+        html_url: "https://github.com/tensorleap/paperclip/pull/15#pullrequestreview-1",
+        user: { login: "assaf" },
+      },
+      pull_request: {
+        number: 15,
+        title: "fix(ten-334): require exact-match when finding TEN issue by GitHub ref",
+        head: { ref: "ten-334-exact-match-issue-finder" },
+      },
+      repository: { full_name: "tensorleap/paperclip" },
+      sender: { login: "assaf" },
+    };
+    const input = webhookInput({ secretRef, payload, eventType: "pull_request_review" });
+    await plugin.definition.onWebhook?.(input);
+
+    const comments = await harness.ctx.issues.listComments(issue.id, companyId);
+    expect(comments).toHaveLength(1);
+    expect(comments[0]?.body).toContain("## GitHub Event: pull_request_review.submitted");
+    expect(comments[0]?.body).toContain("`tensorleap/paperclip#15`");
+  });
+
+  it("dispatches pull_request.opened to TEN-334 when title contains fix(ten-334)", async () => {
+    const companyId = randomUUID();
+    const secretRef = randomUUID();
+    const issue = makeIssue({ companyId, identifier: "TEN-334" });
+    const harness = buildHarness(companyId, secretRef);
+    harness.seed({ issues: [issue] });
+    await plugin.definition.setup(harness.ctx);
+
+    const payload = {
+      action: "opened",
+      pull_request: {
+        number: 99,
+        title: "fix(ten-334): require exact-match when finding TEN issue by GitHub ref",
+        head: { ref: "fix/no-ten-id-here" },
+        html_url: "https://github.com/tensorleap/paperclip/pull/99",
+        merged: false,
+        user: { login: "cto-agent" },
+      },
+      repository: { full_name: "tensorleap/paperclip" },
+      sender: { login: "cto-agent" },
+    };
+    const input = webhookInput({ secretRef, payload, eventType: "pull_request" });
+    await plugin.definition.onWebhook?.(input);
+
+    const comments = await harness.ctx.issues.listComments(issue.id, companyId);
+    expect(comments).toHaveLength(1);
+    expect(comments[0]?.body).toContain("## GitHub Event: pull_request.opened");
+  });
+
+  it("still creates triage issue when neither branch nor title contains a TEN identifier", async () => {
+    const companyId = randomUUID();
+    const secretRef = randomUUID();
+    const harness = buildHarness(companyId, secretRef);
+    await plugin.definition.setup(harness.ctx);
+
+    const payload = {
+      action: "opened",
+      pull_request: {
+        number: 999,
+        title: "chore: update deps",
+        head: { ref: "chore/update-deps" },
+      },
+      repository: { full_name: "tensorleap/fsd" },
+      sender: { login: "devuser" },
+    };
+    const input = webhookInput({ secretRef, payload, eventType: "pull_request" });
+    await plugin.definition.onWebhook?.(input);
+
+    const allIssues = await harness.ctx.issues.list({ companyId });
+    const triageIssue = allIssues.find((i) => i.title.includes("triage: unmapped tensorleap/fsd#999"));
+    expect(triageIssue).toBeDefined();
+  });
+});
+
+// ──────────────────────────────────────────────
 // Unmapped refs — triage issue creation
 // ──────────────────────────────────────────────
 
