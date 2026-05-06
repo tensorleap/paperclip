@@ -223,8 +223,32 @@ async function findTenIssue(
   // we need all candidates so the exact-string filter below can find the right one.
   const results = await ctx.issues.list({ companyId, q: githubRef });
   if (!results || results.length === 0) return null;
-  // Only accept issues where the ref literally appears in title or description.
+
   const needle = githubRef.toLowerCase();
+
+  // Primary strategy: check the github-links document for an authoritative PR→issue mapping.
+  // The production server full-text-indexes document content, so issues whose github-links
+  // doc contains the ref will appear in the text search results above.
+  for (const issue of results) {
+    const doc = await ctx.issues.documents.get(issue.id, "github-links", companyId);
+    if (doc?.body) {
+      try {
+        const links = JSON.parse(doc.body) as { prs?: unknown[] };
+        if (
+          Array.isArray(links.prs) &&
+          links.prs.some((pr) => typeof pr === "string" && pr.toLowerCase() === needle)
+        ) {
+          return { id: issue.id, identifier: issue.identifier ?? issue.id };
+        }
+      } catch {
+        // malformed document body — skip and try next
+      }
+    }
+  }
+
+  // Fallback: issue text contains the ref literally in title or description.
+  // The text search may tokenize the query and return broad matches, so we
+  // require a literal substring match here.
   const exact = results.find(
     (issue) =>
       (issue.title?.toLowerCase().includes(needle) ?? false) ||

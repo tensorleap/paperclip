@@ -64,7 +64,9 @@ function makeIssue(partial: {
 function buildHarness(companyId: string, secretRef: string) {
   return createTestHarness({
     manifest,
-    capabilities: [...manifest.capabilities, "issue.comments.read"],
+    // issue.comments.read and issue.documents.write are only needed for test
+    // setup/assertions, not by the plugin itself at runtime.
+    capabilities: [...manifest.capabilities, "issue.comments.read", "issue.documents.write"],
     config: { companyId, webhookSecretRef: secretRef },
   });
 }
@@ -451,6 +453,92 @@ describe("check_suite events", () => {
     };
     const input = webhookInput({ secretRef, payload, eventType: "check_suite" });
     await expect(plugin.definition.onWebhook?.(input)).resolves.not.toThrow();
+  });
+});
+
+// ──────────────────────────────────────────────
+// github-links document matching — TEN-427 (AC1 + AC2)
+// ──────────────────────────────────────────────
+
+describe("github-links document matching", () => {
+  it("dispatches via github-links doc when text-search candidate has matching prs entry", async () => {
+    const companyId = randomUUID();
+    const secretRef = randomUUID();
+    // Issue has ref in description so harness text search returns it
+    const issue = makeIssue({ companyId, identifier: "TEN-334", githubRef: "tensorleap/paperclip#15" });
+    const harness = buildHarness(companyId, secretRef);
+    harness.seed({ issues: [issue] });
+    // Upsert github-links document — this is the authoritative mapping
+    await harness.ctx.issues.documents.upsert({
+      issueId: issue.id,
+      key: "github-links",
+      body: JSON.stringify({ issues: [], prs: ["tensorleap/paperclip#15"] }),
+      companyId,
+      title: "GitHub Links",
+    });
+    await plugin.definition.setup(harness.ctx);
+
+    const payload = {
+      action: "submitted",
+      review: {
+        state: "approved",
+        html_url: "https://github.com/tensorleap/paperclip/pull/15#pullrequestreview-99",
+        user: { login: "assaf" },
+      },
+      pull_request: {
+        number: 15,
+        title: "fix(ten-334): require exact-match",
+        head: { ref: "ten-334-github-webhook-dispatcher" },
+      },
+      repository: { full_name: "tensorleap/paperclip" },
+      sender: { login: "assaf" },
+    };
+    const input = webhookInput({ secretRef, payload, eventType: "pull_request_review" });
+    await plugin.definition.onWebhook?.(input);
+
+    const comments = await harness.ctx.issues.listComments(issue.id, companyId);
+    expect(comments).toHaveLength(1);
+    expect(comments[0]?.body).toContain("## GitHub Event: pull_request_review.submitted");
+    expect(comments[0]?.body).toContain("`tensorleap/paperclip#15`");
+  });
+
+  it("falls back to title/description when github-links doc does not list the incoming ref", async () => {
+    const companyId = randomUUID();
+    const secretRef = randomUUID();
+    // Issue has ref in description so text search finds it
+    const issue = makeIssue({ companyId, identifier: "TEN-334", githubRef: "tensorleap/paperclip#15" });
+    const harness = buildHarness(companyId, secretRef);
+    harness.seed({ issues: [issue] });
+    // github-links doc exists but lists a DIFFERENT PR — primary strategy misses
+    await harness.ctx.issues.documents.upsert({
+      issueId: issue.id,
+      key: "github-links",
+      body: JSON.stringify({ issues: [], prs: ["tensorleap/paperclip#99"] }),
+      companyId,
+      title: "GitHub Links",
+    });
+    await plugin.definition.setup(harness.ctx);
+
+    const payload = {
+      action: "opened",
+      pull_request: {
+        number: 15,
+        title: "chore: update deps", // no TEN-NNN in title so branch/title fallback also misses
+        head: { ref: "chore/update-deps" }, // no TEN-NNN in branch
+        html_url: "https://github.com/tensorleap/paperclip/pull/15",
+        merged: false,
+        user: { login: "cto-agent" },
+      },
+      repository: { full_name: "tensorleap/paperclip" },
+      sender: { login: "cto-agent" },
+    };
+    const input = webhookInput({ secretRef, payload, eventType: "pull_request" });
+    await plugin.definition.onWebhook?.(input);
+
+    // Dispatched via description fallback (description has the ref)
+    const comments = await harness.ctx.issues.listComments(issue.id, companyId);
+    expect(comments).toHaveLength(1);
+    expect(comments[0]?.body).toContain("## GitHub Event: pull_request.opened");
   });
 });
 
